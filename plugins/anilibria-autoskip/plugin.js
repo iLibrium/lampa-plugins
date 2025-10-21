@@ -6,7 +6,7 @@
 
   class AniLibriaAutoSkip {
     constructor() {
-      this.version = '1.0.3';
+      this.version = '1.0.4';
       this.component = 'anilibria_autoskip';
       this.name = 'AniLibria AutoSkip';
       this.settings = Object.assign({
@@ -51,17 +51,52 @@
     }
 
     addSettingsToLampa() {
-      if (typeof Lampa !== 'undefined' && Lampa.Settings && Lampa.Settings.component) {
-        Lampa.Settings.component({
-          component: this.component,
-          name: this.name,
-          icon: '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>'
-        });
-        Lampa.Settings.listener.follow('open', (e) => {
+      if (typeof Lampa === 'undefined' || !Lampa.Settings) {
+        console.error(`[${this.name}] Не удалось добавить настройки (Settings не найдены).`);
+        return;
+      }
+
+      const settings = Lampa.Settings;
+      const config = {
+        component: this.component,
+        name: this.name,
+        icon: '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>',
+        onSelect: () => this.openSettingsModal()
+      };
+
+      const registerMethods = ['addComponent', 'register', 'registerComponent', 'add', 'component'];
+      let registered = false;
+      for (const method of registerMethods) {
+        if (typeof settings[method] === 'function') {
+          try {
+            settings[method](config);
+            registered = true;
+            break;
+          } catch (err) {
+            console.warn(`[${this.name}] Settings.${method} завершился с ошибкой:`, err);
+          }
+        }
+      }
+
+      if (!registered && Array.isArray(settings.components)) {
+        settings.components.push(config);
+        registered = true;
+      }
+
+      if (!registered && Array.isArray(settings.items)) {
+        settings.items.push(config);
+        registered = true;
+      }
+
+      if (!registered) {
+        console.error(`[${this.name}] Не удалось добавить настройки (неизвестный API Settings).`);
+        return;
+      }
+
+      if (settings.listener && typeof settings.listener.follow === 'function') {
+        settings.listener.follow('open', (e) => {
           if (e.name === this.component) this.openSettingsModal();
         });
-      } else {
-        console.error(`[${this.name}] Не удалось добавить настройки.`);
       }
     }
 
