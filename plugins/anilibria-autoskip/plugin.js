@@ -6,7 +6,7 @@
 
   class AniLibriaAutoSkip {
     constructor() {
-      this.version = '1.0.5';
+      this.version = '1.0.6';
       this.component = 'anilibria_autoskip';
       this.name = 'AniLibria AutoSkip';
       this.settings = Object.assign({
@@ -23,6 +23,10 @@
       this.openingSkipped = false;
       this.endingSkipped = false;
       this.activeSegment = null;
+      this.segmentRanges = {
+        opening: [],
+        ending: []
+      };
       this.skipButton = null;
       this.skipButtonTimeouts = {
         progress: null,
@@ -151,6 +155,10 @@
       this.openingSkipped = false;
       this.endingSkipped = false;
       this.activeSegment = null;
+      this.segmentRanges = {
+        opening: [],
+        ending: []
+      };
       this.ensureSkipButton();
       this.hideSkipButton();
 
@@ -160,10 +168,12 @@
 
         if (!Number.isFinite(this.video.duration)) {
           this._bindedOnLoadedMeta = () => {
+            this.collectSegmentRanges();
             this.attachTimeHandler();
           };
           this.video.addEventListener('loadedmetadata', this._bindedOnLoadedMeta, { once: true });
         } else {
+          this.collectSegmentRanges();
           this.attachTimeHandler();
         }
 
@@ -205,7 +215,24 @@
       this._bindedOnLoadedMeta = null;
       this._bindedOnPlaying = null;
       this.activeSegment = null;
+      this.segmentRanges = {
+        opening: [],
+        ending: []
+      };
       this.hideSkipButton(true);
+    }
+
+    collectSegmentRanges() {
+      if (!this.video) return;
+      const fromTracks = this.getRangesFromTextTracks(this.video);
+      if (fromTracks.opening.length || fromTracks.ending.length) {
+        this.segmentRanges = fromTracks;
+        return;
+      }
+      const fromPlayer = this.getRangesFromPlayerData();
+      if (fromPlayer.opening.length || fromPlayer.ending.length) {
+        this.segmentRanges = fromPlayer;
+      }
     }
 
     getVideo() {
@@ -218,9 +245,7 @@
       const d = this.video.duration;
       if (!Number.isFinite(d) || d <= 0) return;
 
-      const opening = this.getOpeningRange(d);
-      const ending = this.getEndingRange(d);
-      const segment = this.detectSegment(t, opening, ending);
+      const segment = this.detectSegment(t, d);
 
       if (segment) {
         this.showSkipButton(segment);
@@ -246,7 +271,11 @@
       return { start, end };
     }
 
-    detectSegment(time, opening, ending) {
+    detectSegment(time, duration) {
+      const detected = this.detectSegmentFromRanges(time);
+      if (detected) return detected;
+      const opening = this.getOpeningRange(duration);
+      const ending = this.getEndingRange(duration);
       if (this.settings.skipOpenings && !this.openingSkipped &&
           time >= opening.start && time <= opening.end) {
         return 'opening';
@@ -254,6 +283,113 @@
       if (this.settings.skipEndings && !this.endingSkipped &&
           time >= ending.start && time <= ending.end) {
         return 'ending';
+      }
+      return null;
+    }
+
+    detectSegmentFromRanges(time) {
+      if (this.settings.skipOpenings && !this.openingSkipped) {
+        if (this.isTimeInRanges(time, this.segmentRanges.opening)) {
+          return 'opening';
+        }
+      }
+      if (this.settings.skipEndings && !this.endingSkipped) {
+        if (this.isTimeInRanges(time, this.segmentRanges.ending)) {
+          return 'ending';
+        }
+      }
+      return null;
+    }
+
+    isTimeInRanges(time, ranges) {
+      return ranges.some((range) => time >= range.start && time <= range.end);
+    }
+
+    getRangesFromTextTracks(video) {
+      const ranges = { opening: [], ending: [] };
+      if (!video.textTracks) return ranges;
+      const introRegex = /(op|opening|intro|вступ|застав)/i;
+      const outroRegex = /(ed|ending|outro|credits|титр)/i;
+      for (let i = 0; i < video.textTracks.length; i += 1) {
+        const track = video.textTracks[i];
+        const kind = track.kind || '';
+        if (!['chapters', 'metadata', 'subtitles'].includes(kind)) continue;
+        const cues = track.cues || [];
+        for (let j = 0; j < cues.length; j += 1) {
+          const cue = cues[j];
+          const text = `${cue.id || ''} ${cue.text || ''}`.trim();
+          if (introRegex.test(text)) {
+            ranges.opening.push({ start: cue.startTime, end: cue.endTime });
+          } else if (outroRegex.test(text)) {
+            ranges.ending.push({ start: cue.startTime, end: cue.endTime });
+          }
+        }
+      }
+      return ranges;
+    }
+
+    getRangesFromPlayerData() {
+      const ranges = { opening: [], ending: [] };
+      if (typeof Lampa === 'undefined' || !Lampa.Player) return ranges;
+      const data = this.getPlayerData();
+      if (!data) return ranges;
+      this.extractRangesFromObject(data, ranges, 0);
+      return ranges;
+    }
+
+    getPlayerData() {
+      const player = Lampa.Player;
+      if (player && typeof player.get === 'function') return player.get();
+      if (player && typeof player.data === 'function') return player.data();
+      if (player && player.current) return player.current;
+      if (player && player.item) return player.item;
+      return null;
+    }
+
+    extractRangesFromObject(data, ranges, depth) {
+      if (!data || depth > 3) return;
+      if (Array.isArray(data)) {
+        data.forEach((item) => this.extractRangesFromObject(item, ranges, depth + 1));
+        return;
+      }
+      if (typeof data !== 'object') return;
+
+      Object.keys(data).forEach((key) => {
+        const value = data[key];
+        if (!value || typeof value !== 'object') {
+          return;
+        }
+        const lower = key.toLowerCase();
+        const kind = this.getSegmentKindFromKey(lower);
+        const range = this.normalizeRange(value);
+        if (kind && range) {
+          ranges[kind].push(range);
+        } else {
+          this.extractRangesFromObject(value, ranges, depth + 1);
+        }
+      });
+    }
+
+    getSegmentKindFromKey(key) {
+      if (/(opening|intro|op|вступ|застав)/i.test(key)) return 'opening';
+      if (/(ending|outro|ed|credits|титр)/i.test(key)) return 'ending';
+      return null;
+    }
+
+    normalizeRange(value) {
+      if (Array.isArray(value) && value.length >= 2) {
+        const start = Number(value[0]);
+        const end = Number(value[1]);
+        if (Number.isFinite(start) && Number.isFinite(end)) {
+          return { start, end };
+        }
+      }
+      if (typeof value === 'object') {
+        const start = Number(value.start ?? value.begin ?? value.from);
+        const end = Number(value.end ?? value.finish ?? value.to);
+        if (Number.isFinite(start) && Number.isFinite(end)) {
+          return { start, end };
+        }
       }
       return null;
     }
@@ -384,13 +520,17 @@
       if (!Number.isFinite(duration) || duration <= 0) return;
 
       if (segment === 'opening') {
-        const opening = this.getOpeningRange(duration);
+        const opening = this.segmentRanges.opening.length
+          ? this.segmentRanges.opening[0]
+          : this.getOpeningRange(duration);
         this.openingSkipped = true;
         this.safeSeek(opening.end);
         this.notify('Опенинг пропущен');
       }
       if (segment === 'ending') {
-        const ending = this.getEndingRange(duration);
+        const ending = this.segmentRanges.ending.length
+          ? this.segmentRanges.ending[0]
+          : this.getEndingRange(duration);
         this.endingSkipped = true;
         this.safeSeek(Math.min(duration - 1, Math.max(0, ending.end)));
         this.notify('Эндинг пропущен');
