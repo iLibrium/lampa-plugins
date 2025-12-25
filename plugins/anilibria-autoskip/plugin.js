@@ -6,7 +6,7 @@
 
   class AniLibriaAutoSkip {
     constructor() {
-      this.version = '1.0.4';
+      this.version = '1.0.5';
       this.component = 'anilibria_autoskip';
       this.name = 'AniLibria AutoSkip';
       this.settings = Object.assign({
@@ -22,6 +22,12 @@
       this.timeHandler = null;
       this.openingSkipped = false;
       this.endingSkipped = false;
+      this.activeSegment = null;
+      this.skipButton = null;
+      this.skipButtonTimeouts = {
+        progress: null,
+        hide: null
+      };
       this._bindedOnLoadedMeta = null;
       this._bindedOnPlaying = null;
 
@@ -144,6 +150,9 @@
       if (!this.settings.enabled) return;
       this.openingSkipped = false;
       this.endingSkipped = false;
+      this.activeSegment = null;
+      this.ensureSkipButton();
+      this.hideSkipButton();
 
       const attach = () => {
         this.video = this.getVideo();
@@ -195,6 +204,8 @@
       this.timeHandler = null;
       this._bindedOnLoadedMeta = null;
       this._bindedOnPlaying = null;
+      this.activeSegment = null;
+      this.hideSkipButton(true);
     }
 
     getVideo() {
@@ -207,26 +218,185 @@
       const d = this.video.duration;
       if (!Number.isFinite(d) || d <= 0) return;
 
-      const opening = { start: 85, end: 105 };
-      let ending = { start: Math.max(0, d - 90), end: Math.max(0, d - 30) };
-      if (ending.end <= ending.start) {
-        ending = { start: Infinity, end: Infinity };
+      const opening = this.getOpeningRange(d);
+      const ending = this.getEndingRange(d);
+      const segment = this.detectSegment(t, opening, ending);
+
+      if (segment) {
+        this.showSkipButton(segment);
+      } else if (this.activeSegment) {
+        this.hideSkipButton();
+      }
+    }
+
+    getOpeningRange(duration) {
+      const start = Math.min(90, Math.max(30, duration * 0.05));
+      const end = Math.min(150, Math.max(start + 10, duration * 0.12));
+      return { start, end };
+    }
+
+    getEndingRange(duration) {
+      const endOffset = Math.max(30, duration * 0.02);
+      const startOffset = Math.max(90, duration * 0.08);
+      const start = Math.max(0, duration - startOffset);
+      const end = Math.max(0, duration - endOffset);
+      if (end <= start) {
+        return { start: Infinity, end: Infinity };
+      }
+      return { start, end };
+    }
+
+    detectSegment(time, opening, ending) {
+      if (this.settings.skipOpenings && !this.openingSkipped &&
+          time >= opening.start && time <= opening.end) {
+        return 'opening';
+      }
+      if (this.settings.skipEndings && !this.endingSkipped &&
+          time >= ending.start && time <= ending.end) {
+        return 'ending';
+      }
+      return null;
+    }
+
+    ensureSkipButton() {
+      if (this.skipButton) return;
+
+      const styleId = 'al-autoskip-style';
+      if (!document.getElementById(styleId)) {
+        const style = document.createElement('style');
+        style.id = styleId;
+        style.textContent = `
+          .al-autoskip-btn {
+            position: fixed;
+            right: 40px;
+            bottom: 120px;
+            width: 132px;
+            height: 132px;
+            border-radius: 50%;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 0, 0, 0.65);
+            color: #fff;
+            font-size: 16px;
+            font-weight: 600;
+            text-align: center;
+            z-index: 9999;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            box-sizing: border-box;
+            cursor: pointer;
+          }
+          .al-autoskip-btn.is-visible {
+            display: flex;
+          }
+          .al-autoskip-btn::before {
+            content: "";
+            position: absolute;
+            inset: -8px;
+            border-radius: 50%;
+            background: conic-gradient(#4CAF50 0deg, rgba(76, 175, 80, 0.25) 0deg);
+            mask: radial-gradient(farthest-side, transparent calc(100% - 10px), #000 calc(100% - 9px));
+            opacity: 0;
+          }
+          .al-autoskip-btn.is-animating::before {
+            opacity: 1;
+            animation: al-autoskip-progress 5s linear forwards;
+          }
+          @keyframes al-autoskip-progress {
+            from {
+              background: conic-gradient(#4CAF50 0deg, rgba(76, 175, 80, 0.25) 0deg);
+            }
+            to {
+              background: conic-gradient(#4CAF50 360deg, rgba(76, 175, 80, 0.25) 360deg);
+            }
+          }
+        `;
+        document.head.appendChild(style);
       }
 
-      if (this.settings.skipOpenings && !this.openingSkipped &&
-          t >= opening.start && t <= opening.end) {
+      const button = document.createElement('div');
+      button.className = 'al-autoskip-btn';
+      button.textContent = 'Пропустить';
+      button.addEventListener('click', () => {
+        if (!this.activeSegment) return;
+        this.performSkip(this.activeSegment);
+      });
+      document.body.appendChild(button);
+      this.skipButton = button;
+    }
+
+    showSkipButton(segment) {
+      this.ensureSkipButton();
+      if (!this.skipButton) return;
+
+      const isSame = this.activeSegment === segment;
+      const wasVisible = this.skipButton.classList.contains('is-visible');
+      this.activeSegment = segment;
+      this.skipButton.classList.add('is-visible');
+
+      if (!isSame || !wasVisible) {
+        this.restartButtonAnimation();
+        this.clearSkipButtonTimers();
+        this.skipButtonTimeouts.progress = setTimeout(() => {
+          if (this.activeSegment === segment) {
+            this.performSkip(segment);
+          }
+        }, 5000);
+        this.skipButtonTimeouts.hide = setTimeout(() => {
+          if (this.activeSegment === segment) {
+            this.hideSkipButton();
+          }
+        }, 10000);
+      }
+    }
+
+    hideSkipButton(force = false) {
+      if (!this.skipButton) return;
+      this.clearSkipButtonTimers();
+      this.skipButton.classList.remove('is-visible', 'is-animating');
+      if (force) {
+        this.skipButton.style.display = 'none';
+      }
+      this.activeSegment = null;
+    }
+
+    clearSkipButtonTimers() {
+      if (this.skipButtonTimeouts.progress) {
+        clearTimeout(this.skipButtonTimeouts.progress);
+      }
+      if (this.skipButtonTimeouts.hide) {
+        clearTimeout(this.skipButtonTimeouts.hide);
+      }
+      this.skipButtonTimeouts.progress = null;
+      this.skipButtonTimeouts.hide = null;
+    }
+
+    restartButtonAnimation() {
+      if (!this.skipButton) return;
+      this.skipButton.classList.remove('is-animating');
+      void this.skipButton.offsetWidth;
+      this.skipButton.classList.add('is-animating');
+    }
+
+    performSkip(segment) {
+      if (!this.video) return;
+      const duration = this.video.duration;
+      if (!Number.isFinite(duration) || duration <= 0) return;
+
+      if (segment === 'opening') {
+        const opening = this.getOpeningRange(duration);
         this.openingSkipped = true;
         this.safeSeek(opening.end);
         this.notify('Опенинг пропущен');
-        return;
       }
-
-      if (this.settings.skipEndings && !this.endingSkipped &&
-          t >= ending.start && t <= ending.end) {
+      if (segment === 'ending') {
+        const ending = this.getEndingRange(duration);
         this.endingSkipped = true;
-        this.safeSeek(Math.min(d - 1, Math.max(0, ending.end)));
+        this.safeSeek(Math.min(duration - 1, Math.max(0, ending.end)));
         this.notify('Эндинг пропущен');
       }
+
+      this.hideSkipButton();
     }
 
     safeSeek(target) {
