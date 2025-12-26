@@ -77,7 +77,7 @@
 
     addSettingsToLampa() {
       if (typeof Lampa === 'undefined' || !Lampa.Settings) {
-        this.log('error', 'Failed to add settings (Settings missing).');
+        this.log('warn', 'Settings UI unavailable (Lampa.Settings missing), plugin continues without menu.');
         return;
       }
 
