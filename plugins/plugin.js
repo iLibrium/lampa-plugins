@@ -9,6 +9,7 @@
       this.version = '1.0.6';
       this.component = 'autoskip';
       this.name = 'AutoSkip';
+      this.logTag = '[Autoskip]';
       this.settings = Object.assign({
         enabled: true,
         autoStart: true,
@@ -58,7 +59,7 @@
         this.listenPlayer();
         if (this.settings.autoStart && this.settings.enabled) this.start();
         window[PLUGIN_ID] = true;
-        console.log(`[${this.name}] initialized (${this.version}).`);
+        this.log('log', `initialized (${this.version}).`);
       });
     }
 
@@ -69,14 +70,14 @@
       const check = () => {
         if (typeof Lampa !== 'undefined' && Lampa.Settings && Lampa.Player) cb();
         else if (attempts++ < maxAttempts) setTimeout(check, checkInterval);
-        else console.error(`[${this.name}] Lampa not found (incompatible environment?).`);
+        else this.log('error', 'Lampa not found (incompatible environment?).');
       };
       check();
     }
 
     addSettingsToLampa() {
       if (typeof Lampa === 'undefined' || !Lampa.Settings) {
-        console.error(`[${this.name}] Failed to add settings (Settings missing).`);
+        this.log('error', 'Failed to add settings (Settings missing).');
         return;
       }
 
@@ -97,7 +98,7 @@
             registered = true;
             break;
           } catch (err) {
-            console.warn(`[${this.name}] Settings.${method} threw:`, err);
+            this.log('warn', `Settings.${method} threw:`, err);
           }
         }
       }
@@ -113,7 +114,7 @@
       }
 
       if (!registered) {
-        console.error(`[${this.name}] Failed to add settings (unknown Settings API).`);
+        this.log('error', 'Failed to add settings (unknown Settings API).');
         return;
       }
 
@@ -153,7 +154,7 @@
           });
         }, 100);
       } else {
-        console.warn(`[${this.name}] Settings modal works only inside Lampa.`);
+        this.log('warn', 'Settings modal works only inside Lampa.');
       }
     }
 
@@ -244,15 +245,29 @@
       const fromTracks = this.getRangesFromTextTracks(this.video);
       if (fromTracks.intro.length || fromTracks.credits.length) {
         this.segmentRanges = fromTracks;
-        this.logSegmentRanges('textTracks', fromTracks);
+        this.logSegmentRanges('textTracks', fromTracks, {
+          introCount: fromTracks.intro.length,
+          creditsCount: fromTracks.credits.length
+        });
         return;
       }
       const fromPlayer = this.getRangesFromPlayerData();
       if (fromPlayer.intro.length || fromPlayer.credits.length) {
         this.segmentRanges = fromPlayer;
-        this.logSegmentRanges('playerData', fromPlayer);
+        this.logSegmentRanges('playerData', fromPlayer, {
+          introCount: fromPlayer.intro.length,
+          creditsCount: fromPlayer.credits.length
+        });
       } else {
-        this.logSegmentRanges('heuristics', { intro: [], credits: [] });
+        const duration = this.video && Number.isFinite(this.video.duration) ? this.video.duration : null;
+        const introHint = duration ? this.getIntroRange(duration) : null;
+        const creditsHint = duration ? this.getCreditsRange(duration) : null;
+        this.logSegmentRanges('heuristics', { intro: [], credits: [] }, {
+          reason: 'no tagged segments; fallback to time heuristics',
+          duration,
+          introHint,
+          creditsHint
+        });
       }
     }
 
@@ -261,13 +276,13 @@
       if (this.audioContext) return;
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       if (!AudioCtx) {
-        console.warn(`[${this.name}] AudioContext not available, audio-based skip disabled.`);
+        this.log('warn', 'AudioContext not available, audio-based skip disabled.');
         return;
       }
       try {
         this.audioContext = new AudioCtx({ latencyHint: 'interactive' });
       } catch (e) {
-        console.warn(`[${this.name}] Failed to start AudioContext:`, e);
+        this.log('warn', 'Failed to start AudioContext:', e);
         this.audioContext = null;
         return;
       }
@@ -282,7 +297,7 @@
       try {
         this.audioSourceNode = this.audioContext.createMediaElementSource(this.video);
       } catch (e) {
-        console.warn(`[${this.name}] Cannot create media source:`, e);
+        this.log('warn', 'Cannot create media source:', e);
         this.teardownAudioAnalysis();
         return;
       }
@@ -296,10 +311,15 @@
         this.audioSourceNode.connect(this.audioProcessorNode);
         this.audioProcessorNode.connect(this.audioContext.destination);
       } catch (e) {
-        console.warn(`[${this.name}] Cannot wire audio nodes:`, e);
+        this.log('warn', 'Cannot wire audio nodes:', e);
         this.teardownAudioAnalysis();
         return;
       }
+      this.log('log', 'audio analysis started', {
+        sampleRate: this.audioContext.sampleRate,
+        bufferSize,
+        windowSec: this.rmsConfig.windowSec
+      });
 
       const resumeContext = () => {
         if (!this.audioContext) return;
@@ -697,6 +717,11 @@
       this.skipButton.classList.add('is-visible');
 
       if (!isSame || !wasVisible) {
+        const t = this.video && Number.isFinite(this.video.currentTime) ? this.video.currentTime.toFixed(2) : 'n/a';
+        this.log('log', `segment detected -> ${segment} at ${t}s`, {
+          ranges: this.segmentRanges[segment] || [],
+          duration: this.video ? this.video.duration : undefined
+        });
         this.restartButtonAnimation();
         this.clearSkipButtonTimers();
         this.skipButtonTimeouts.progress = setTimeout(() => {
@@ -770,7 +795,7 @@
       try {
         if (Number.isFinite(target)) this.video.currentTime = target;
       } catch (e) {
-        console.warn(`[${this.name}] Failed to seek:`, e);
+        this.log('warn', 'Failed to seek:', e);
       }
     }
 
@@ -779,7 +804,7 @@
       if (typeof Lampa !== 'undefined' && Lampa.Noty) {
         Lampa.Noty.show(msg);
       } else {
-        console.log(`[${this.name}] ${msg}`);
+        this.log('log', msg);
       }
     }
 
@@ -814,21 +839,29 @@
 
     start() {
       this.isRunning = true;
-      console.log(`[${this.name}] auto-skip started.`);
+      this.log('log', 'auto-skip started.');
     }
 
     stop() {
       this.isRunning = false;
-      console.log(`[${this.name}] auto-skip stopped.`);
+      this.log('log', 'auto-skip stopped.');
     }
 
-    logSegmentRanges(source, ranges) {
+    logSegmentRanges(source, ranges, meta = null) {
       const format = (seg) => seg.map((r) => `${r.start.toFixed(1)}-${r.end.toFixed(1)}s`).join(', ') || 'none';
       const intro = ranges.intro || [];
       const credits = ranges.credits || [];
-      console.log(
-        `[${this.name}] segments from ${source}: intro=${format(intro)}; credits=${format(credits)}`
-      );
+      this.log('log', `segments from ${source}: intro=${format(intro)}; credits=${format(credits)}`, meta);
+    }
+
+    log(level, message, extra = undefined) {
+      const fn = console[level] || console.log;
+      const prefix = `${this.logTag} `;
+      if (extra !== undefined) {
+        fn.call(console, `${prefix}${message}`, extra);
+      } else {
+        fn.call(console, `${prefix}${message}`);
+      }
     }
   }
 
