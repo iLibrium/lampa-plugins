@@ -17,6 +17,7 @@
         skipCredits: true,
         showNotifications: true
       }, this.loadSettings());
+      this.segmentCache = this.loadSegmentCache();
 
       this.isRunning = false;
       this.video = null;
@@ -49,6 +50,7 @@
         minSegmentSec: 8,
         mergeGapSec: 1
       };
+      this.silentGainNode = null;
 
       this.init();
     }
@@ -181,6 +183,12 @@
         this.video = this.getVideo();
         if (!this.video) return false;
 
+        const cached = this.loadCachedSegments();
+        if (cached) {
+          this.segmentRanges = cached;
+          this.logSegmentRanges('cache', cached);
+        }
+
         if (!Number.isFinite(this.video.duration)) {
           this._bindedOnLoadedMeta = () => {
             this.collectSegmentRanges();
@@ -249,6 +257,7 @@
           introCount: fromTracks.intro.length,
           creditsCount: fromTracks.credits.length
         });
+        this.saveSegmentsToCache(fromTracks);
         return;
       }
       const fromPlayer = this.getRangesFromPlayerData();
@@ -258,6 +267,7 @@
           introCount: fromPlayer.intro.length,
           creditsCount: fromPlayer.credits.length
         });
+        this.saveSegmentsToCache(fromPlayer);
       } else {
         const duration = this.video && Number.isFinite(this.video.duration) ? this.video.duration : null;
         const introHint = duration ? this.getIntroRange(duration) : null;
@@ -307,9 +317,13 @@
       this.audioProcessorNode = this.audioContext.createScriptProcessor(bufferSize, inputChannels, inputChannels);
       this.audioProcessorNode.onaudioprocess = (event) => this.handleAudioProcess(event);
 
+      this.silentGainNode = this.audioContext.createGain();
+      this.silentGainNode.gain.value = 0;
+
       try {
         this.audioSourceNode.connect(this.audioProcessorNode);
-        this.audioProcessorNode.connect(this.audioContext.destination);
+        this.audioProcessorNode.connect(this.silentGainNode);
+        this.silentGainNode.connect(this.audioContext.destination);
       } catch (e) {
         this.log('warn', 'Cannot wire audio nodes:', e);
         this.teardownAudioAnalysis();
@@ -429,7 +443,20 @@
       if (creditsCandidates.length) newRanges.credits.push(creditsCandidates[creditsCandidates.length - 1]);
       if (newRanges.intro.length || newRanges.credits.length) {
         this.segmentRanges = newRanges;
-        this.logSegmentRanges('audio', newRanges);
+        this.logSegmentRanges('audio', newRanges, {
+          windows: windows.length,
+          baseline: {
+            size: baselineSize,
+            median,
+            mad,
+            threshold: thresh,
+            windowSec: this.rmsConfig.windowSec,
+            minSegmentSec: this.rmsConfig.minSegmentSec,
+            mergeGapSec: this.rmsConfig.mergeGapSec
+          },
+          candidates: filtered.length
+        });
+        this.saveSegmentsToCache(newRanges);
       }
     }
 
@@ -473,10 +500,14 @@
       if (this.video && this._bindedOnSeeking) {
         this.video.removeEventListener('seeking', this._bindedOnSeeking);
       }
+      if (this.silentGainNode) {
+        try { this.silentGainNode.disconnect(); } catch (e) { /* noop */ }
+      }
       this.audioContext = null;
       this.audioSourceNode = null;
       this.audioProcessorNode = null;
       this.audioAnalysisState = null;
+      this.silentGainNode = null;
       this._bindedOnPlayForAudio = null;
       this._bindedOnSeeking = null;
     }
@@ -852,6 +883,60 @@
       const intro = ranges.intro || [];
       const credits = ranges.credits || [];
       this.log('log', `segments from ${source}: intro=${format(intro)}; credits=${format(credits)}`, meta);
+    }
+
+    getCacheKey() {
+      if (!this.video) return null;
+      const src = this.video.currentSrc || this.video.src || '';
+      const duration = Number.isFinite(this.video.duration) ? Math.round(this.video.duration * 10) / 10 : null;
+      if (!src || duration === null) return null;
+      return `${src}::${duration}`;
+    }
+
+    loadSegmentCache() {
+      try {
+        return JSON.parse(localStorage.getItem('autoskip_segment_cache') || '{}') || {};
+      } catch (e) {
+        return {};
+      }
+    }
+
+    saveSegmentCache(cache) {
+      try {
+        localStorage.setItem('autoskip_segment_cache', JSON.stringify(cache));
+      } catch (e) {
+        this.log('warn', 'Failed to save cache:', e);
+      }
+    }
+
+    loadCachedSegments() {
+      const key = this.getCacheKey();
+      if (!key) return null;
+      const cache = this.segmentCache || {};
+      return cache[key] || null;
+    }
+
+    saveSegmentsToCache(ranges) {
+      const key = this.getCacheKey();
+      if (!key) return;
+      if (!ranges || (!ranges.intro || !ranges.intro.length) && (!ranges.credits || !ranges.credits.length)) return;
+      const cache = this.segmentCache || {};
+      cache[key] = {
+        intro: ranges.intro.slice(),
+        credits: ranges.credits.slice(),
+        ts: Date.now()
+      };
+      const keys = Object.keys(cache);
+      const maxEntries = 50;
+      if (keys.length > maxEntries) {
+        keys.sort((a, b) => (cache[a].ts || 0) - (cache[b].ts || 0));
+        for (let i = 0; i < keys.length - maxEntries; i += 1) {
+          delete cache[keys[i]];
+        }
+      }
+      this.segmentCache = cache;
+      this.saveSegmentCache(cache);
+      this.log('log', 'segments cached', { key, intro: ranges.intro, credits: ranges.credits });
     }
 
     log(level, message, extra = undefined) {
