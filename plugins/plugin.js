@@ -244,11 +244,15 @@
       const fromTracks = this.getRangesFromTextTracks(this.video);
       if (fromTracks.intro.length || fromTracks.credits.length) {
         this.segmentRanges = fromTracks;
+        this.logSegmentRanges('textTracks', fromTracks);
         return;
       }
       const fromPlayer = this.getRangesFromPlayerData();
       if (fromPlayer.intro.length || fromPlayer.credits.length) {
         this.segmentRanges = fromPlayer;
+        this.logSegmentRanges('playerData', fromPlayer);
+      } else {
+        this.logSegmentRanges('heuristics', { intro: [], credits: [] });
       }
     }
 
@@ -405,6 +409,7 @@
       if (creditsCandidates.length) newRanges.credits.push(creditsCandidates[creditsCandidates.length - 1]);
       if (newRanges.intro.length || newRanges.credits.length) {
         this.segmentRanges = newRanges;
+        this.logSegmentRanges('audio', newRanges);
       }
     }
 
@@ -815,6 +820,15 @@
     stop() {
       this.isRunning = false;
       console.log(`[${this.name}] auto-skip stopped.`);
+    }
+
+    logSegmentRanges(source, ranges) {
+      const format = (seg) => seg.map((r) => `${r.start.toFixed(1)}-${r.end.toFixed(1)}s`).join(', ') || 'none';
+      const intro = ranges.intro || [];
+      const credits = ranges.credits || [];
+      console.log(
+        `[${this.name}] segments from ${source}: intro=${format(intro)}; credits=${format(credits)}`
+      );
     }
   }
 
