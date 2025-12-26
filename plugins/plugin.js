@@ -9,7 +9,7 @@
       this.version = '1.0.6';
       this.component = 'autoskip';
       this.name = 'AutoSkip';
-      this.logTag = '[Autoskip]';
+      this.logTag = '[AutoSkip]';
       this.settings = Object.assign({
         enabled: true,
         autoStart: true,
@@ -89,7 +89,7 @@
         onSelect: () => this.openSettingsModal()
       };
 
-      const registerMethods = ['addComponent', 'register', 'registerComponent', 'add', 'component'];
+      const registerMethods = ['addComponent', 'register', 'registerComponent', 'add', 'addItem', 'component'];
       let registered = false;
       for (const method of registerMethods) {
         if (typeof settings[method] === 'function') {
@@ -114,7 +114,7 @@
       }
 
       if (!registered) {
-        this.log('error', 'Failed to add settings (unknown Settings API).');
+        this.log('warn', 'Settings API not recognized, skipping settings registration.');
         return;
       }
 
