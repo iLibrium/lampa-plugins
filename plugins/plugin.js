@@ -30,10 +30,6 @@
         credits: []
       };
       this.skipButton = null;
-      this.skipButtonTimeouts = {
-        progress: null,
-        hide: null
-      };
       this._bindedOnLoadedMeta = null;
       this._bindedOnPlaying = null;
       this._bindedOnPlayForAudio = null;
@@ -42,6 +38,7 @@
       this.audioContext = null;
       this.audioSourceNode = null;
       this.audioProcessorNode = null;
+      this.audioPassthroughNode = null;
       this.audioAnalysisState = null;
       this.rmsConfig = {
         windowSec: 0.5,
@@ -183,21 +180,17 @@
         this.video = this.getVideo();
         if (!this.video) return false;
 
-        const cached = this.loadCachedSegments();
-        if (cached) {
-          this.segmentRanges = cached;
-          this.logSegmentRanges('cache', cached);
-        }
+        this.applyCachedSegments();
 
         if (!Number.isFinite(this.video.duration)) {
           this._bindedOnLoadedMeta = () => {
-            this.collectSegmentRanges();
+            this.applyCachedSegments();
             this.attachTimeHandler();
             this.startAudioAnalysis();
           };
           this.video.addEventListener('loadedmetadata', this._bindedOnLoadedMeta, { once: true });
         } else {
-          this.collectSegmentRanges();
+          this.applyCachedSegments();
           this.attachTimeHandler();
           this.startAudioAnalysis();
         }
@@ -249,36 +242,7 @@
     }
 
     collectSegmentRanges() {
-      if (!this.video) return;
-      const fromTracks = this.getRangesFromTextTracks(this.video);
-      if (fromTracks.intro.length || fromTracks.credits.length) {
-        this.segmentRanges = fromTracks;
-        this.logSegmentRanges('textTracks', fromTracks, {
-          introCount: fromTracks.intro.length,
-          creditsCount: fromTracks.credits.length
-        });
-        this.saveSegmentsToCache(fromTracks);
-        return;
-      }
-      const fromPlayer = this.getRangesFromPlayerData();
-      if (fromPlayer.intro.length || fromPlayer.credits.length) {
-        this.segmentRanges = fromPlayer;
-        this.logSegmentRanges('playerData', fromPlayer, {
-          introCount: fromPlayer.intro.length,
-          creditsCount: fromPlayer.credits.length
-        });
-        this.saveSegmentsToCache(fromPlayer);
-      } else {
-        const duration = this.video && Number.isFinite(this.video.duration) ? this.video.duration : null;
-        const introHint = duration ? this.getIntroRange(duration) : null;
-        const creditsHint = duration ? this.getCreditsRange(duration) : null;
-        this.logSegmentRanges('heuristics', { intro: [], credits: [] }, {
-          reason: 'no tagged segments; fallback to time heuristics',
-          duration,
-          introHint,
-          creditsHint
-        });
-      }
+      this.applyCachedSegments();
     }
 
     startAudioAnalysis() {
@@ -319,11 +283,15 @@
 
       this.silentGainNode = this.audioContext.createGain();
       this.silentGainNode.gain.value = 0;
+      this.audioPassthroughNode = this.audioContext.createGain();
+      this.audioPassthroughNode.gain.value = 1;
 
       try {
         this.audioSourceNode.connect(this.audioProcessorNode);
         this.audioProcessorNode.connect(this.silentGainNode);
         this.silentGainNode.connect(this.audioContext.destination);
+        this.audioSourceNode.connect(this.audioPassthroughNode);
+        this.audioPassthroughNode.connect(this.audioContext.destination);
       } catch (e) {
         this.log('warn', 'Cannot wire audio nodes:', e);
         this.teardownAudioAnalysis();
@@ -503,9 +471,13 @@
       if (this.silentGainNode) {
         try { this.silentGainNode.disconnect(); } catch (e) { /* noop */ }
       }
+      if (this.audioPassthroughNode) {
+        try { this.audioPassthroughNode.disconnect(); } catch (e) { /* noop */ }
+      }
       this.audioContext = null;
       this.audioSourceNode = null;
       this.audioProcessorNode = null;
+      this.audioPassthroughNode = null;
       this.audioAnalysisState = null;
       this.silentGainNode = null;
       this._bindedOnPlayForAudio = null;
@@ -531,37 +503,8 @@
       }
     }
 
-    getIntroRange(duration) {
-      const start = Math.min(90, Math.max(30, duration * 0.05));
-      const end = Math.min(150, Math.max(start + 10, duration * 0.12));
-      return { start, end };
-    }
-
-    getCreditsRange(duration) {
-      const endOffset = Math.max(30, duration * 0.02);
-      const startOffset = Math.max(90, duration * 0.08);
-      const start = Math.max(0, duration - startOffset);
-      const end = Math.max(0, duration - endOffset);
-      if (end <= start) {
-        return { start: Infinity, end: Infinity };
-      }
-      return { start, end };
-    }
-
     detectSegment(time, duration) {
-      const detected = this.detectSegmentFromRanges(time);
-      if (detected) return detected;
-      const intro = this.getIntroRange(duration);
-      const credits = this.getCreditsRange(duration);
-      if (this.settings.skipIntro && !this.introSkipped &&
-          time >= intro.start && time <= intro.end) {
-        return 'intro';
-      }
-      if (this.settings.skipCredits && !this.creditsSkipped &&
-          time >= credits.start && time <= credits.end) {
-        return 'credits';
-      }
-      return null;
+      return this.detectSegmentFromRanges(time);
     }
 
     detectSegmentFromRanges(time) {
@@ -754,39 +697,16 @@
           duration: this.video ? this.video.duration : undefined
         });
         this.restartButtonAnimation();
-        this.clearSkipButtonTimers();
-        this.skipButtonTimeouts.progress = setTimeout(() => {
-          if (this.activeSegment === segment) {
-            this.performSkip(segment);
-          }
-        }, 5000);
-        this.skipButtonTimeouts.hide = setTimeout(() => {
-          if (this.activeSegment === segment) {
-            this.hideSkipButton();
-          }
-        }, 10000);
       }
     }
 
     hideSkipButton(force = false) {
       if (!this.skipButton) return;
-      this.clearSkipButtonTimers();
       this.skipButton.classList.remove('is-visible', 'is-animating');
       if (force) {
         this.skipButton.style.display = 'none';
       }
       this.activeSegment = null;
-    }
-
-    clearSkipButtonTimers() {
-      if (this.skipButtonTimeouts.progress) {
-        clearTimeout(this.skipButtonTimeouts.progress);
-      }
-      if (this.skipButtonTimeouts.hide) {
-        clearTimeout(this.skipButtonTimeouts.hide);
-      }
-      this.skipButtonTimeouts.progress = null;
-      this.skipButtonTimeouts.hide = null;
     }
 
     restartButtonAnimation() {
@@ -802,17 +722,15 @@
       if (!Number.isFinite(duration) || duration <= 0) return;
 
       if (segment === 'intro') {
-        const intro = this.segmentRanges.intro.length
-          ? this.segmentRanges.intro[0]
-          : this.getIntroRange(duration);
+        const intro = this.segmentRanges.intro.length ? this.segmentRanges.intro[0] : null;
+        if (!intro) return;
         this.introSkipped = true;
         this.safeSeek(intro.end);
         this.notify('\u041f\u0440\u043e\u043f\u0443\u0449\u0435\u043d\u043e \u0432\u0441\u0442\u0443\u043f\u043b\u0435\u043d\u0438\u0435');
       }
       if (segment === 'credits') {
-        const credits = this.segmentRanges.credits.length
-          ? this.segmentRanges.credits[0]
-          : this.getCreditsRange(duration);
+        const credits = this.segmentRanges.credits.length ? this.segmentRanges.credits[0] : null;
+        if (!credits) return;
         this.creditsSkipped = true;
         this.safeSeek(Math.min(duration - 1, Math.max(0, credits.end)));
         this.notify('\u041f\u0440\u043e\u043f\u0443\u0449\u0435\u043d\u044b \u0442\u0438\u0442\u0440\u044b');
@@ -914,6 +832,17 @@
       if (!key) return null;
       const cache = this.segmentCache || {};
       return cache[key] || null;
+    }
+
+    applyCachedSegments() {
+      const cached = this.loadCachedSegments();
+      if (cached && (cached.intro?.length || cached.credits?.length)) {
+        this.segmentRanges = {
+          intro: cached.intro.slice(),
+          credits: cached.credits.slice()
+        };
+        this.logSegmentRanges('cache', this.segmentRanges, { key: this.getCacheKey() });
+      }
     }
 
     saveSegmentsToCache(ranges) {
