@@ -3,10 +3,20 @@ function getLampaSettings() {
   return Lampa.Settings;
 }
 
-export function registerSettingsComponent({ component, name, icon, onSelect, log }) {
+export function isSettingsApiReady(settings) {
+  if (!settings) return false;
+  const registerMethods = ['addComponent', 'register', 'registerComponent', 'add', 'addItem', 'component'];
+  const hasMethod = registerMethods.some((method) => typeof settings[method] === 'function');
+  const hasArray = Array.isArray(settings.components) || Array.isArray(settings.items);
+  return hasMethod || hasArray;
+}
+
+export function registerSettingsComponent({ component, name, icon, onSelect, log, quiet = false }) {
   const settings = getLampaSettings();
   if (!settings) {
-    log('warn', 'Settings UI unavailable (Lampa.Settings missing), plugin continues without menu.');
+    if (!quiet) {
+      log('warn', 'Settings UI unavailable (Lampa.Settings missing), plugin continues without menu.');
+    }
     return false;
   }
 
@@ -42,7 +52,9 @@ export function registerSettingsComponent({ component, name, icon, onSelect, log
   }
 
   if (!registered) {
-    log('warn', 'Settings API not recognized, skipping settings registration.');
+    if (!quiet) {
+      log('warn', 'Settings API not recognized, skipping settings registration.');
+    }
     return false;
   }
 
@@ -64,6 +76,7 @@ export function showSettingsModal({ name, version, settings, onChange, log }) {
       <label><input type="checkbox" data-setting="skipIntro" ${settings.skipIntro ? 'checked' : ''}/> Пропускать вступление</label><br>
       <label><input type="checkbox" data-setting="skipCredits" ${settings.skipCredits ? 'checked' : ''}/> Пропускать титры</label><br>
       <label><input type="checkbox" data-setting="showNotifications" ${settings.showNotifications ? 'checked' : ''}/> Показывать уведомления</label><br>
+      <label><input type="checkbox" data-setting="debug" ${settings.debug ? 'checked' : ''}/> Debug-логи</label><br>
       <div style="margin-top:10px;font-size:13px;color:#aaa">Версия: ${version}</div>
     </div>
   `;
@@ -94,4 +107,3 @@ export function showSettingsModal({ name, version, settings, onChange, log }) {
     });
   }, 100);
 }
-

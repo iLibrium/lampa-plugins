@@ -98,10 +98,20 @@
       return null;
     return Lampa.Settings;
   }
-  function registerSettingsComponent({ component, name, icon, onSelect, log }) {
+  function isSettingsApiReady(settings) {
+    if (!settings)
+      return false;
+    const registerMethods = ["addComponent", "register", "registerComponent", "add", "addItem", "component"];
+    const hasMethod = registerMethods.some((method) => typeof settings[method] === "function");
+    const hasArray = Array.isArray(settings.components) || Array.isArray(settings.items);
+    return hasMethod || hasArray;
+  }
+  function registerSettingsComponent({ component, name, icon, onSelect, log, quiet = false }) {
     const settings = getLampaSettings();
     if (!settings) {
-      log("warn", "Settings UI unavailable (Lampa.Settings missing), plugin continues without menu.");
+      if (!quiet) {
+        log("warn", "Settings UI unavailable (Lampa.Settings missing), plugin continues without menu.");
+      }
       return false;
     }
     const config = {
@@ -132,7 +142,9 @@
       registered = true;
     }
     if (!registered) {
-      log("warn", "Settings API not recognized, skipping settings registration.");
+      if (!quiet) {
+        log("warn", "Settings API not recognized, skipping settings registration.");
+      }
       return false;
     }
     if (settings.listener && typeof settings.listener.follow === "function") {
@@ -152,6 +164,7 @@
       <label><input type="checkbox" data-setting="skipIntro" ${settings.skipIntro ? "checked" : ""}/> Пропускать вступление</label><br>
       <label><input type="checkbox" data-setting="skipCredits" ${settings.skipCredits ? "checked" : ""}/> Пропускать титры</label><br>
       <label><input type="checkbox" data-setting="showNotifications" ${settings.showNotifications ? "checked" : ""}/> Показывать уведомления</label><br>
+      <label><input type="checkbox" data-setting="debug" ${settings.debug ? "checked" : ""}/> Debug-логи</label><br>
       <div style="margin-top:10px;font-size:13px;color:#aaa">Версия: ${version}</div>
     </div>
   `;
@@ -763,7 +776,8 @@
         autoStart: true,
         skipIntro: true,
         skipCredits: true,
-        showNotifications: true
+        showNotifications: true,
+        debug: false
       }, loadSettings());
       this.segmentCache = loadSegmentCache();
       this.isRunning = false;
@@ -772,10 +786,15 @@
       this.introSkipped = false;
       this.creditsSkipped = false;
       this.activeSegment = null;
+      this.activeSegmentRange = null;
       this.segmentRanges = { intro: [], credits: [] };
       this.segmentSources = { intro: null, credits: null };
       this._bindedOnLoadedMeta = null;
       this._bindedOnPlaying = null;
+      this._settingsRegistered = false;
+      this._cacheSaveTimer = null;
+      this._cachePendingKey = null;
+      this._cachePendingRanges = null;
       this.rmsConfig = {
         windowSec: 0.5,
         baselineWindows: 120,
@@ -799,7 +818,7 @@
     }
     init() {
       waitForLampa({
-        predicate: () => typeof Lampa !== "undefined" && Lampa.Settings && Lampa.Player,
+        predicate: () => typeof Lampa !== "undefined" && Lampa.Player && Lampa.Player.listener,
         onReady: () => {
           this.addSettingsToLampa();
           this.listenPlayer();
@@ -815,13 +834,37 @@
     }
     addSettingsToLampa() {
       const icon = '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
-      registerSettingsComponent({
-        component: this.component,
-        name: this.name,
-        icon,
-        onSelect: () => this.openSettingsModal(),
-        log: this.log
-      });
+      const maxAttempts = 30;
+      const retryDelayMs = 500;
+      const tryRegister = (attempt) => {
+        if (this._settingsRegistered)
+          return;
+        const isLastAttempt = attempt >= maxAttempts - 1;
+        if (typeof Lampa === "undefined" || !Lampa.Settings || !isSettingsApiReady(Lampa.Settings)) {
+          if (isLastAttempt) {
+            this.log("warn", "Settings API not ready, skipping settings registration.");
+            return;
+          }
+          setTimeout(() => tryRegister(attempt + 1), retryDelayMs);
+          return;
+        }
+        const ok = registerSettingsComponent({
+          component: this.component,
+          name: this.name,
+          icon,
+          onSelect: () => this.openSettingsModal(),
+          log: this.log,
+          quiet: !isLastAttempt
+        });
+        if (ok) {
+          this._settingsRegistered = true;
+          return;
+        }
+        if (isLastAttempt)
+          return;
+        setTimeout(() => tryRegister(attempt + 1), retryDelayMs);
+      };
+      tryRegister(0);
     }
     openSettingsModal() {
       showSettingsModal({
@@ -902,11 +945,13 @@
         this.video.removeEventListener("playing", this._bindedOnPlaying);
       }
       this.audioDetector.stop();
+      this.flushPendingCacheSave();
       this.video = null;
       this.timeHandler = null;
       this._bindedOnLoadedMeta = null;
       this._bindedOnPlaying = null;
       this.activeSegment = null;
+      this.activeSegmentRange = null;
       this.segmentRanges = { intro: [], credits: [] };
       this.segmentSources = { intro: null, credits: null };
       this.hideSkipButton(true);
@@ -915,6 +960,7 @@
       this.introSkipped = false;
       this.creditsSkipped = false;
       this.activeSegment = null;
+      this.activeSegmentRange = null;
       this.segmentRanges = { intro: [], credits: [] };
       this.segmentSources = { intro: null, credits: null };
     }
@@ -955,11 +1001,13 @@
       return null;
     }
     showSkipButton(segment) {
+      var _a;
       const isSame = this.activeSegment === segment;
       const wasVisible = this.skipButton.isVisible();
       this.activeSegment = segment;
       this.skipButton.show();
       if (!isSame || !wasVisible) {
+        this.activeSegmentRange = ((_a = this.segmentRanges[segment]) == null ? void 0 : _a.length) ? Object.assign({}, this.segmentRanges[segment][0]) : null;
         const t = this.video && Number.isFinite(this.video.currentTime) ? this.video.currentTime.toFixed(2) : "n/a";
         this.log("log", `segment detected -> ${segment} at ${t}s`, {
           ranges: this.segmentRanges[segment] || [],
@@ -974,6 +1022,7 @@
       if (destroy)
         this.skipButton.destroy();
       this.activeSegment = null;
+      this.activeSegmentRange = null;
     }
     performSkip(segment) {
       if (!this.video)
@@ -982,7 +1031,7 @@
       if (!Number.isFinite(duration) || duration <= 0)
         return;
       if (segment === "intro") {
-        const intro = this.segmentRanges.intro.length ? this.segmentRanges.intro[0] : null;
+        const intro = this.activeSegmentRange && this.activeSegment === "intro" ? this.activeSegmentRange : this.segmentRanges.intro.length ? this.segmentRanges.intro[0] : null;
         if (!intro)
           return;
         this.introSkipped = true;
@@ -990,7 +1039,7 @@
         this.notify("Пропущено вступление");
       }
       if (segment === "credits") {
-        const credits = this.segmentRanges.credits.length ? this.segmentRanges.credits[0] : null;
+        const credits = this.activeSegmentRange && this.activeSegment === "credits" ? this.activeSegmentRange : this.segmentRanges.credits.length ? this.segmentRanges.credits[0] : null;
         if (!credits)
           return;
         this.creditsSkipped = true;
@@ -1067,15 +1116,43 @@
       const key = getCacheKey(this.video);
       if (!key)
         return;
+      if (!ranges || (!ranges.intro || !ranges.intro.length) && (!ranges.credits || !ranges.credits.length))
+        return;
+      this._cachePendingKey = key;
+      this._cachePendingRanges = {
+        intro: (ranges.intro || []).slice(),
+        credits: (ranges.credits || []).slice()
+      };
+      if (this._cacheSaveTimer)
+        return;
+      this._cacheSaveTimer = setTimeout(() => this.flushPendingCacheSave(), 1500);
+    }
+    flushPendingCacheSave() {
+      if (!this._cacheSaveTimer && !this._cachePendingKey)
+        return;
+      if (this._cacheSaveTimer) {
+        clearTimeout(this._cacheSaveTimer);
+        this._cacheSaveTimer = null;
+      }
+      const key = this._cachePendingKey;
+      const ranges = this._cachePendingRanges;
+      this._cachePendingKey = null;
+      this._cachePendingRanges = null;
+      if (!key || !ranges)
+        return;
       writeCachedRanges(this.segmentCache, key, ranges);
       try {
         saveSegmentCache(this.segmentCache);
-        this.log("log", "segments cached", { key, intro: ranges.intro, credits: ranges.credits });
+        if (this.settings.debug) {
+          this.log("log", "segments cached", { key, intro: ranges.intro, credits: ranges.credits });
+        }
       } catch (e) {
         this.log("warn", "Failed to save cache:", e);
       }
     }
     logSegmentRanges(source, ranges, meta = null) {
+      if (!this.settings.debug)
+        return;
       const format = (seg) => seg.map((r) => `${r.start.toFixed(1)}-${r.end.toFixed(1)}s`).join(", ") || "none";
       const intro = ranges.intro || [];
       const credits = ranges.credits || [];

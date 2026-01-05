@@ -1,7 +1,7 @@
 import { createLogger } from './logger.js';
 import { loadSegmentCache, loadSettings, saveSegmentCache, saveSettings } from './storage.js';
 import { waitForLampa } from '../lampa/waitForLampa.js';
-import { registerSettingsComponent, showSettingsModal } from '../lampa/settingsUi.js';
+import { isSettingsApiReady, registerSettingsComponent, showSettingsModal } from '../lampa/settingsUi.js';
 import { getCacheKey, readCachedRanges, writeCachedRanges } from '../segments/cache.js';
 import { isTimeInRanges, normalizeRanges, rangesEqual } from '../segments/ranges.js';
 import { AudioSegmentDetector } from '../segments/providers/audioDetector.js';
@@ -29,7 +29,8 @@ export class AutoSkipPlugin {
       autoStart: true,
       skipIntro: true,
       skipCredits: true,
-      showNotifications: true
+      showNotifications: true,
+      debug: false
     }, loadSettings());
 
     this.segmentCache = loadSegmentCache();
@@ -41,11 +42,16 @@ export class AutoSkipPlugin {
     this.introSkipped = false;
     this.creditsSkipped = false;
     this.activeSegment = null;
+    this.activeSegmentRange = null;
     this.segmentRanges = { intro: [], credits: [] };
     this.segmentSources = { intro: null, credits: null };
 
     this._bindedOnLoadedMeta = null;
     this._bindedOnPlaying = null;
+    this._settingsRegistered = false;
+    this._cacheSaveTimer = null;
+    this._cachePendingKey = null;
+    this._cachePendingRanges = null;
 
     this.rmsConfig = {
       windowSec: 0.5,
@@ -73,7 +79,7 @@ export class AutoSkipPlugin {
 
   init() {
     waitForLampa({
-      predicate: () => typeof Lampa !== 'undefined' && Lampa.Settings && Lampa.Player,
+      predicate: () => typeof Lampa !== 'undefined' && Lampa.Player && Lampa.Player.listener,
       onReady: () => {
         this.addSettingsToLampa();
         this.listenPlayer();
@@ -89,13 +95,40 @@ export class AutoSkipPlugin {
 
   addSettingsToLampa() {
     const icon = '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
-    registerSettingsComponent({
-      component: this.component,
-      name: this.name,
-      icon,
-      onSelect: () => this.openSettingsModal(),
-      log: this.log
-    });
+    const maxAttempts = 30;
+    const retryDelayMs = 500;
+
+    const tryRegister = (attempt) => {
+      if (this._settingsRegistered) return;
+      const isLastAttempt = attempt >= maxAttempts - 1;
+      if (typeof Lampa === 'undefined' || !Lampa.Settings || !isSettingsApiReady(Lampa.Settings)) {
+        if (isLastAttempt) {
+          this.log('warn', 'Settings API not ready, skipping settings registration.');
+          return;
+        }
+        setTimeout(() => tryRegister(attempt + 1), retryDelayMs);
+        return;
+      }
+
+      const ok = registerSettingsComponent({
+        component: this.component,
+        name: this.name,
+        icon,
+        onSelect: () => this.openSettingsModal(),
+        log: this.log,
+        quiet: !isLastAttempt
+      });
+
+      if (ok) {
+        this._settingsRegistered = true;
+        return;
+      }
+
+      if (isLastAttempt) return;
+      setTimeout(() => tryRegister(attempt + 1), retryDelayMs);
+    };
+
+    tryRegister(0);
   }
 
   openSettingsModal() {
@@ -183,12 +216,14 @@ export class AutoSkipPlugin {
     }
 
     this.audioDetector.stop();
+    this.flushPendingCacheSave();
 
     this.video = null;
     this.timeHandler = null;
     this._bindedOnLoadedMeta = null;
     this._bindedOnPlaying = null;
     this.activeSegment = null;
+    this.activeSegmentRange = null;
     this.segmentRanges = { intro: [], credits: [] };
     this.segmentSources = { intro: null, credits: null };
 
@@ -199,6 +234,7 @@ export class AutoSkipPlugin {
     this.introSkipped = false;
     this.creditsSkipped = false;
     this.activeSegment = null;
+    this.activeSegmentRange = null;
     this.segmentRanges = { intro: [], credits: [] };
     this.segmentSources = { intro: null, credits: null };
   }
@@ -249,6 +285,7 @@ export class AutoSkipPlugin {
     this.skipButton.show();
 
     if (!isSame || !wasVisible) {
+      this.activeSegmentRange = this.segmentRanges[segment]?.length ? Object.assign({}, this.segmentRanges[segment][0]) : null;
       const t = this.video && Number.isFinite(this.video.currentTime) ? this.video.currentTime.toFixed(2) : 'n/a';
       this.log('log', `segment detected -> ${segment} at ${t}s`, {
         ranges: this.segmentRanges[segment] || [],
@@ -263,6 +300,7 @@ export class AutoSkipPlugin {
     this.skipButton.hide();
     if (destroy) this.skipButton.destroy();
     this.activeSegment = null;
+    this.activeSegmentRange = null;
   }
 
   performSkip(segment) {
@@ -271,7 +309,9 @@ export class AutoSkipPlugin {
     if (!Number.isFinite(duration) || duration <= 0) return;
 
     if (segment === 'intro') {
-      const intro = this.segmentRanges.intro.length ? this.segmentRanges.intro[0] : null;
+      const intro = (this.activeSegmentRange && this.activeSegment === 'intro')
+        ? this.activeSegmentRange
+        : (this.segmentRanges.intro.length ? this.segmentRanges.intro[0] : null);
       if (!intro) return;
       this.introSkipped = true;
       this.safeSeek(intro.end);
@@ -279,7 +319,9 @@ export class AutoSkipPlugin {
     }
 
     if (segment === 'credits') {
-      const credits = this.segmentRanges.credits.length ? this.segmentRanges.credits[0] : null;
+      const credits = (this.activeSegmentRange && this.activeSegment === 'credits')
+        ? this.activeSegmentRange
+        : (this.segmentRanges.credits.length ? this.segmentRanges.credits[0] : null);
       if (!credits) return;
       this.creditsSkipped = true;
       this.safeSeek(Math.min(duration - 1, Math.max(0, credits.end)));
@@ -356,16 +398,45 @@ export class AutoSkipPlugin {
   saveSegmentsToCache(ranges) {
     const key = getCacheKey(this.video);
     if (!key) return;
+    if (!ranges || (!ranges.intro || !ranges.intro.length) && (!ranges.credits || !ranges.credits.length)) return;
+
+    this._cachePendingKey = key;
+    this._cachePendingRanges = {
+      intro: (ranges.intro || []).slice(),
+      credits: (ranges.credits || []).slice()
+    };
+
+    if (this._cacheSaveTimer) return;
+    this._cacheSaveTimer = setTimeout(() => this.flushPendingCacheSave(), 1500);
+  }
+
+  flushPendingCacheSave() {
+    if (!this._cacheSaveTimer && !this._cachePendingKey) return;
+
+    if (this._cacheSaveTimer) {
+      clearTimeout(this._cacheSaveTimer);
+      this._cacheSaveTimer = null;
+    }
+
+    const key = this._cachePendingKey;
+    const ranges = this._cachePendingRanges;
+    this._cachePendingKey = null;
+    this._cachePendingRanges = null;
+
+    if (!key || !ranges) return;
     writeCachedRanges(this.segmentCache, key, ranges);
     try {
       saveSegmentCache(this.segmentCache);
-      this.log('log', 'segments cached', { key, intro: ranges.intro, credits: ranges.credits });
+      if (this.settings.debug) {
+        this.log('log', 'segments cached', { key, intro: ranges.intro, credits: ranges.credits });
+      }
     } catch (e) {
       this.log('warn', 'Failed to save cache:', e);
     }
   }
 
   logSegmentRanges(source, ranges, meta = null) {
+    if (!this.settings.debug) return;
     const format = (seg) => seg.map((r) => `${r.start.toFixed(1)}-${r.end.toFixed(1)}s`).join(', ') || 'none';
     const intro = ranges.intro || [];
     const credits = ranges.credits || [];
@@ -376,4 +447,3 @@ export class AutoSkipPlugin {
     return document.querySelector('video');
   }
 }
-
