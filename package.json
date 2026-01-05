@@ -1,0 +1,13 @@
+{
+  "name": "autoskip",
+  "private": true,
+  "description": "AutoSkip plugin for Lampa",
+  "scripts": {
+    "build": "node scripts/build.js",
+    "watch": "node scripts/build.js --watch"
+  },
+  "devDependencies": {
+    "esbuild": "^0.20.2"
+  }
+}
+
