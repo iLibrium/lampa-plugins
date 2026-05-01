@@ -11,7 +11,7 @@ const DEFAULT_CONFIG = {
   creditsMinFraction: 0.75,
   fftSize: 2048,
   voiceMusicMaxRatio: 0.4,
-  silenceProbeWindows: 20,
+  silenceProbeWindows: 6,
   silenceProbeRmsThreshold: 1e-6
 };
 
@@ -26,10 +26,11 @@ function clampFreqIndex(freqHz, sampleRate, binCount) {
 }
 
 export class AudioProvider extends ProviderBase {
-  constructor({ log, config = {}, onUpdate }) {
+  constructor({ log, config = {}, onUpdate, onTainted }) {
     super({ name: 'audio', log });
     this.config = Object.assign({}, DEFAULT_CONFIG, config);
     this.onUpdate = onUpdate || (() => {});
+    this.onTainted = onTainted || (() => {});
 
     this.video = null;
     this.audioContext = null;
@@ -239,6 +240,7 @@ export class AudioProvider extends ProviderBase {
     if (this._silenceProbeRemaining === 0) {
       this._taintedDetected = true;
       this.log('warn', 'audio tainted (CORS) or silent stream — provider disabled.');
+      try { this.onTainted(); } catch (e) { /* noop */ }
       this.cancel();
     }
   }

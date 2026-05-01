@@ -21,7 +21,7 @@ import { t as translate, registerTranslations } from '../util/i18n.js';
 
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '2.1.0';
+    this.version = '2.1.1';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';
@@ -49,7 +49,10 @@ export class AutoSkipPlugin {
     this.chaptersProvider = new ChaptersProvider({ log: this.log });
     this.audioProvider = new AudioProvider({
       log: this.log,
-      onUpdate: (ranges, meta) => this._onProviderUpdate('audio', ranges, meta)
+      onUpdate: (ranges, meta) => this._onProviderUpdate('audio', ranges, meta),
+      onTainted: () => {
+        if (this.settings.debug) this._notify(translate('autoskip_audio_cors'));
+      }
     });
     this.aniSkipProvider = new AniSkipProvider({
       log: this.log,

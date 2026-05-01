@@ -13,7 +13,8 @@ const FALLBACK = {
     autoskip_setting_debug: 'Debug-логи',
     autoskip_setting_disable: 'Отключить плагин',
     autoskip_setting_aniskip: 'Использовать AniSkip API для аниме',
-    autoskip_settings_version: 'Версия'
+    autoskip_settings_version: 'Версия',
+    autoskip_audio_cors: 'AutoSkip: аудио-детект недоступен на этом источнике (CORS)'
   },
   en: {
     autoskip_name: 'AutoSkip',
@@ -29,7 +30,8 @@ const FALLBACK = {
     autoskip_setting_debug: 'Debug logs',
     autoskip_setting_disable: 'Disable plugin',
     autoskip_setting_aniskip: 'Use AniSkip API for anime',
-    autoskip_settings_version: 'Version'
+    autoskip_settings_version: 'Version',
+    autoskip_audio_cors: 'AutoSkip: audio detect unavailable on this source (CORS)'
   }
 };
 
