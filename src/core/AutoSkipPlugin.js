@@ -21,7 +21,7 @@ import { t as translate, registerTranslations } from '../util/i18n.js';
 
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '2.1.1';
+    this.version = '2.1.2';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';
@@ -276,6 +276,21 @@ export class AutoSkipPlugin {
     if (this.settings.debug) this._logSegmentRanges(source, this.resolver.getRanges(), meta);
     if (source !== 'cache') this._scheduleCacheSave(this.resolver.getRanges());
     this._refreshTimelineMarkers();
+    this._noteRetroactiveDetection(source, normalized);
+  }
+
+  _noteRetroactiveDetection(source, normalized) {
+    if (source === 'cache') return;
+    if (!this.video) return;
+    const t = Number.isFinite(this.video.currentTime) ? this.video.currentTime : 0;
+    ['intro', 'credits'].forEach((kind) => {
+      const ranges = normalized[kind] || [];
+      if (!ranges.length) return;
+      const last = ranges[ranges.length - 1];
+      if (last.end < t) {
+        this.log('log', `${kind} detected retroactively (${last.start.toFixed(1)}-${last.end.toFixed(1)}s, now ${t.toFixed(1)}s) — cached for next playthrough.`);
+      }
+    });
   }
 
   _refreshTimelineMarkers() {

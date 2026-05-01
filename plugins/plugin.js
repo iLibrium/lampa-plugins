@@ -1040,14 +1040,15 @@
   // src/segments/providers/AudioProvider.js
   var DEFAULT_CONFIG = {
     windowSec: 0.5,
-    baselineWindows: 120,
+    baselineWindows: 30,
+    warmupWindows: 24,
     zThreshold: 1.4,
-    minSegmentSec: 8,
+    minSegmentSec: 6,
     mergeGapSec: 1,
-    introMaxFraction: 0.25,
-    creditsMinFraction: 0.75,
+    introMaxFraction: 0.3,
+    creditsMinFraction: 0.7,
     fftSize: 2048,
-    voiceMusicMaxRatio: 0.4,
+    voiceMusicMaxRatio: 0.45,
     silenceProbeWindows: 6,
     silenceProbeRmsThreshold: 1e-6
   };
@@ -1323,6 +1324,8 @@
         return;
       const windows = this.state.windows;
       if (!windows.length)
+        return;
+      if (windows.length < this.config.warmupWindows)
         return;
       const baselineSize = Math.min(this.config.baselineWindows, windows.length);
       const baselineSlice = windows.slice(-baselineSize);
@@ -2513,7 +2516,7 @@
   // src/core/AutoSkipPlugin.js
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "2.1.1";
+      this.version = "2.1.2";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";
@@ -2758,6 +2761,23 @@
       if (source !== "cache")
         this._scheduleCacheSave(this.resolver.getRanges());
       this._refreshTimelineMarkers();
+      this._noteRetroactiveDetection(source, normalized);
+    }
+    _noteRetroactiveDetection(source, normalized) {
+      if (source === "cache")
+        return;
+      if (!this.video)
+        return;
+      const t2 = Number.isFinite(this.video.currentTime) ? this.video.currentTime : 0;
+      ["intro", "credits"].forEach((kind) => {
+        const ranges = normalized[kind] || [];
+        if (!ranges.length)
+          return;
+        const last = ranges[ranges.length - 1];
+        if (last.end < t2) {
+          this.log("log", `${kind} detected retroactively (${last.start.toFixed(1)}-${last.end.toFixed(1)}s, now ${t2.toFixed(1)}s) — cached for next playthrough.`);
+        }
+      });
     }
     _refreshTimelineMarkers() {
       if (!this.timelineMarkers)
