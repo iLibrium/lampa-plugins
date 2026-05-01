@@ -48,6 +48,7 @@ export class AudioProvider extends ProviderBase {
     this._lastEmitted = null;
     this._silenceProbeRemaining = 0;
     this._taintedDetected = false;
+    this._lastProgressLogAt = 0;
   }
 
   isApplicable(ctx) {
@@ -273,6 +274,13 @@ export class AudioProvider extends ProviderBase {
     return voiceEnergy / fullEnergy;
   }
 
+  _maybeLogProgress(info) {
+    const now = Date.now();
+    if (now - this._lastProgressLogAt < 10000) return;
+    this._lastProgressLogAt = now;
+    this.log('log', 'audio progress', info);
+  }
+
   _trimWindows() {
     if (!this.state) return;
     const maxWindows = 3600;
@@ -288,7 +296,10 @@ export class AudioProvider extends ProviderBase {
     if (!Number.isFinite(duration) || duration <= 0) return;
     const windows = this.state.windows;
     if (!windows.length) return;
-    if (windows.length < this.config.warmupWindows) return;
+    if (windows.length < this.config.warmupWindows) {
+      this._maybeLogProgress({ phase: 'warmup', windows: windows.length });
+      return;
+    }
 
     const baselineSize = Math.min(this.config.baselineWindows, windows.length);
     const baselineSlice = windows.slice(-baselineSize);
@@ -311,6 +322,14 @@ export class AudioProvider extends ProviderBase {
 
     const merged = mergeSegments(flagged, this.config.mergeGapSec);
     const filtered = merged.filter((seg) => (seg.end - seg.start) >= this.config.minSegmentSec);
+    this._maybeLogProgress({
+      phase: 'analysing',
+      windows: windows.length,
+      median,
+      threshold: thresh,
+      flagged: flagged.length,
+      candidates: filtered.length
+    });
     if (!filtered.length) return;
 
     const introCutoff = duration * this.config.introMaxFraction;

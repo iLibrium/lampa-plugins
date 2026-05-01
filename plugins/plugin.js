@@ -1082,6 +1082,7 @@
       this._lastEmitted = null;
       this._silenceProbeRemaining = 0;
       this._taintedDetected = false;
+      this._lastProgressLogAt = 0;
     }
     isApplicable(ctx) {
       if (!ctx || !ctx.video)
@@ -1307,6 +1308,13 @@
         return null;
       return voiceEnergy / fullEnergy;
     }
+    _maybeLogProgress(info) {
+      const now = Date.now();
+      if (now - this._lastProgressLogAt < 1e4)
+        return;
+      this._lastProgressLogAt = now;
+      this.log("log", "audio progress", info);
+    }
     _trimWindows() {
       if (!this.state)
         return;
@@ -1325,8 +1333,10 @@
       const windows = this.state.windows;
       if (!windows.length)
         return;
-      if (windows.length < this.config.warmupWindows)
+      if (windows.length < this.config.warmupWindows) {
+        this._maybeLogProgress({ phase: "warmup", windows: windows.length });
         return;
+      }
       const baselineSize = Math.min(this.config.baselineWindows, windows.length);
       const baselineSlice = windows.slice(-baselineSize);
       const values = baselineSlice.map((w) => w.rms);
@@ -1347,6 +1357,14 @@
       }
       const merged = mergeSegments(flagged, this.config.mergeGapSec);
       const filtered = merged.filter((seg) => seg.end - seg.start >= this.config.minSegmentSec);
+      this._maybeLogProgress({
+        phase: "analysing",
+        windows: windows.length,
+        median,
+        threshold: thresh,
+        flagged: flagged.length,
+        candidates: filtered.length
+      });
       if (!filtered.length)
         return;
       const introCutoff = duration * this.config.introMaxFraction;
@@ -2516,7 +2534,7 @@
   // src/core/AutoSkipPlugin.js
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "2.1.2";
+      this.version = "2.1.3";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";
