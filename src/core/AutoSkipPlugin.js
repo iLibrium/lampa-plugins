@@ -16,11 +16,12 @@ import { PlaybackController } from '../playback/PlaybackController.js';
 import { VisibilityGuard } from '../playback/visibilityGuard.js';
 import { hasNativeSkip } from '../playback/nativeSkipDetect.js';
 import { SkipPrompt } from '../ui/SkipPrompt/SkipPrompt.js';
+import { TimelineMarkers } from '../ui/TimelineMarkers/TimelineMarkers.js';
 import { t as translate, registerTranslations } from '../util/i18n.js';
 
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '2.0.1';
+    this.version = '2.1.0';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';
@@ -76,6 +77,8 @@ export class AutoSkipPlugin {
         if (target) this.playback.markDismissed(target);
       }
     });
+
+    this.timelineMarkers = new TimelineMarkers({ log: this.log });
 
     this.isRunning = false;
     this.video = null;
@@ -216,6 +219,8 @@ export class AutoSkipPlugin {
 
     this.playback.attach(this.video);
     this.skipPrompt.attachToVideo(this.video);
+    this.timelineMarkers.attach(this.video);
+    this._refreshTimelineMarkers();
     this._runProvider(this.audioProvider);
   }
 
@@ -231,6 +236,7 @@ export class AutoSkipPlugin {
     this.audioProvider.cancel();
     this.audioProvider.reset();
     this.visibilityGuard.detach();
+    this.timelineMarkers.detach();
     this._flushPendingCacheSave();
 
     this.video = null;
@@ -266,6 +272,14 @@ export class AutoSkipPlugin {
 
     if (this.settings.debug) this._logSegmentRanges(source, this.resolver.getRanges(), meta);
     if (source !== 'cache') this._scheduleCacheSave(this.resolver.getRanges());
+    this._refreshTimelineMarkers();
+  }
+
+  _refreshTimelineMarkers() {
+    if (!this.timelineMarkers) return;
+    if (!this.video) return;
+    const duration = Number.isFinite(this.video.duration) ? this.video.duration : 0;
+    this.timelineMarkers.setRanges(this.resolver.getRanges(), duration);
   }
 
   _handleSegmentEnter(segment, range, isSame) {
