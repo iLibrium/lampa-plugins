@@ -5,7 +5,7 @@ import { SegmentCache } from '../storage/SegmentCache.js';
 import { getContentId } from '../segments/contentId.js';
 import { followPlayer } from '../lampa/playerEvents.js';
 import { waitForLampa } from '../lampa/waitForLampa.js';
-import { isSettingsApiReady, registerSettingsComponent, showSettingsModal } from '../lampa/settingsUi.js';
+import { isSettingsApiReady, registerSettingsComponent } from '../lampa/settingsUi.js';
 import { normalizeRanges } from '../segments/ranges.js';
 import { SegmentResolver } from '../segments/SegmentResolver.js';
 import { MetadataProvider } from '../segments/providers/MetadataProvider.js';
@@ -20,7 +20,7 @@ import { t as translate, registerTranslations } from '../util/i18n.js';
 
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '2.0.0';
+    this.version = '2.0.1';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';
@@ -115,9 +115,9 @@ export class AutoSkipPlugin {
     const tryRegister = (attempt) => {
       if (this._settingsRegistered) return;
       const isLastAttempt = attempt >= maxAttempts - 1;
-      if (typeof Lampa === 'undefined' || !Lampa.Settings || !isSettingsApiReady(Lampa.Settings)) {
+      if (!isSettingsApiReady()) {
         if (isLastAttempt) {
-          this.log('warn', 'Settings API not ready, skipping settings registration.');
+          this.log('warn', 'Lampa.SettingsApi not ready, skipping settings registration.');
           return;
         }
         setTimeout(() => tryRegister(attempt + 1), retryDelayMs);
@@ -128,13 +128,18 @@ export class AutoSkipPlugin {
         component: this.component,
         name: this.name,
         icon,
-        onSelect: () => this.openSettingsModal(),
+        defaults: SETTINGS_DEFAULTS,
+        onChange: (key, value) => {
+          this.settings[key] = value;
+          this.settingsStore.set(key, value);
+        },
         log: this.log,
         quiet: !isLastAttempt
       });
 
       if (ok) {
         this._settingsRegistered = true;
+        this.settingsStore.ensureDefaultsPersisted();
         return;
       }
 
@@ -143,19 +148,6 @@ export class AutoSkipPlugin {
     };
 
     tryRegister(0);
-  }
-
-  openSettingsModal() {
-    showSettingsModal({
-      name: this.name,
-      version: this.version,
-      settings: this.settings,
-      onChange: (key, value) => {
-        this.settings[key] = value;
-        this.settingsStore.set(key, value);
-      },
-      log: this.log
-    });
   }
 
   listenPlayer() {

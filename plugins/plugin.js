@@ -79,9 +79,8 @@
   }
 
   // src/storage/SettingsStore.js
-  var STORAGE_KEY = "autoskip_settings";
-  var LEGACY_LOCAL_KEY = "autoskip_settings";
-  var LEGACY_LOCAL_KEY_OLD = "anilibria_autoskip_settings";
+  var STORAGE_KEY_PREFIX = "autoskip_";
+  var LEGACY_JSON_KEYS = ["autoskip_settings", "anilibria_autoskip_settings"];
   var DEFAULTS = {
     enabled: true,
     autoStart: true,
@@ -91,80 +90,76 @@
     debug: false,
     useAniSkip: true
   };
+  var KEY_ALIASES = {
+    skipOpenings: "skipIntro",
+    skipEndings: "skipCredits"
+  };
   function getLampa2() {
     return typeof Lampa !== "undefined" ? Lampa : null;
   }
-  function safeParse(raw) {
-    if (!raw || typeof raw !== "string")
-      return null;
+  function lampaStorageGet(key, fallback) {
+    const lampa = getLampa2();
+    if (!lampa || !lampa.Storage)
+      return fallback;
     try {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object")
-        return parsed;
+      if (typeof lampa.Storage.field === "function") {
+        const value = lampa.Storage.field(key);
+        if (value !== void 0 && value !== null && value !== "")
+          return value;
+      }
+      if (typeof lampa.Storage.get === "function") {
+        const value = lampa.Storage.get(key, fallback);
+        if (value !== void 0 && value !== null && value !== "")
+          return value;
+      }
     } catch (e) {
     }
-    return null;
+    return fallback;
   }
-  function migrateLegacyKeys(obj) {
-    if (!obj)
-      return null;
-    if (obj.skipOpenings !== void 0 && obj.skipIntro === void 0) {
-      obj.skipIntro = obj.skipOpenings;
+  function lampaStorageSet(key, value) {
+    const lampa = getLampa2();
+    if (!lampa || !lampa.Storage || typeof lampa.Storage.set !== "function")
+      return false;
+    try {
+      lampa.Storage.set(key, value);
+      return true;
+    } catch (e) {
+      return false;
     }
-    if (obj.skipEndings !== void 0 && obj.skipCredits === void 0) {
-      obj.skipCredits = obj.skipEndings;
-    }
-    return obj;
   }
-  function readFromLocalStorage() {
-    if (typeof window.localStorage === "undefined")
+  function readLegacyJson() {
+    if (typeof window === "undefined" || !window.localStorage)
       return null;
-    for (const key of [LEGACY_LOCAL_KEY, LEGACY_LOCAL_KEY_OLD]) {
+    for (const key of LEGACY_JSON_KEYS) {
       try {
-        const parsed = safeParse(window.localStorage.getItem(key));
-        if (parsed)
-          return migrateLegacyKeys(parsed);
+        const raw = window.localStorage.getItem(key);
+        if (!raw)
+          continue;
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object")
+          return { key, data: parsed };
       } catch (e) {
       }
     }
     return null;
   }
-  function readFromLampaStorage() {
-    const lampa = getLampa2();
-    if (!lampa || !lampa.Storage)
-      return null;
+  function clearLegacyJson(key) {
+    if (typeof window === "undefined" || !window.localStorage)
+      return;
     try {
-      if (typeof lampa.Storage.get === "function") {
-        const value = lampa.Storage.get(STORAGE_KEY, null);
-        if (value && typeof value === "object")
-          return migrateLegacyKeys(value);
-        if (typeof value === "string")
-          return migrateLegacyKeys(safeParse(value));
-      }
+      window.localStorage.removeItem(key);
     } catch (e) {
-    }
-    return null;
-  }
-  function writeToLampaStorage(obj) {
-    const lampa = getLampa2();
-    if (!lampa || !lampa.Storage || typeof lampa.Storage.set !== "function")
-      return false;
-    try {
-      lampa.Storage.set(STORAGE_KEY, obj);
-      return true;
-    } catch (e) {
-      return false;
     }
   }
-  function writeToLocalStorage(obj) {
-    if (typeof window.localStorage === "undefined")
-      return false;
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
-      return true;
-    } catch (e) {
-      return false;
+  function applyAliases(obj) {
+    if (!obj)
+      return obj;
+    const out = Object.assign({}, obj);
+    for (const [from, to] of Object.entries(KEY_ALIASES)) {
+      if (out[from] !== void 0 && out[to] === void 0)
+        out[to] = out[from];
     }
+    return out;
   }
   var SettingsStore = class {
     constructor({ log = null } = {}) {
@@ -175,21 +170,34 @@
     load() {
       if (this._loaded)
         return this.values;
-      let stored = readFromLampaStorage();
-      let migratedFromLocal = false;
-      if (!stored) {
-        stored = readFromLocalStorage();
-        if (stored)
-          migratedFromLocal = true;
-      }
-      if (stored)
-        Object.assign(this.values, stored);
-      this._loaded = true;
-      if (migratedFromLocal) {
-        this.save();
+      const legacy = readLegacyJson();
+      if (legacy) {
+        const aliased = applyAliases(legacy.data);
+        Object.keys(DEFAULTS).forEach((key) => {
+          if (aliased[key] !== void 0) {
+            lampaStorageSet(STORAGE_KEY_PREFIX + key, !!aliased[key]);
+          }
+        });
+        const legacyCacheJson = (() => {
+          try {
+            return window.localStorage.getItem("autoskip_segment_cache");
+          } catch (e) {
+            return null;
+          }
+        })();
+        if (legacyCacheJson)
+          lampaStorageSet("autoskip_segment_cache_legacy", legacyCacheJson);
+        clearLegacyJson(legacy.key);
         if (this.log)
-          this.log("log", "settings migrated from localStorage to Lampa.Storage");
+          this.log("log", `settings migrated from localStorage[${legacy.key}] to Lampa.Storage`);
       }
+      Object.keys(DEFAULTS).forEach((key) => {
+        const stored = lampaStorageGet(STORAGE_KEY_PREFIX + key, void 0);
+        if (stored === void 0)
+          return;
+        this.values[key] = !!stored;
+      });
+      this._loaded = true;
       return this.values;
     }
     get(key) {
@@ -206,30 +214,32 @@
       if (!this._loaded)
         this.load();
       this.values[key] = value;
-      this.save();
+      if (key in DEFAULTS)
+        lampaStorageSet(STORAGE_KEY_PREFIX + key, value);
     }
     update(patch) {
+      Object.keys(patch || {}).forEach((key) => this.set(key, patch[key]));
+    }
+    ensureDefaultsPersisted() {
       if (!this._loaded)
         this.load();
-      Object.assign(this.values, patch || {});
-      this.save();
-    }
-    save() {
-      if (!writeToLampaStorage(this.values)) {
-        writeToLocalStorage(this.values);
-      }
+      Object.keys(DEFAULTS).forEach((key) => {
+        const stored = lampaStorageGet(STORAGE_KEY_PREFIX + key, void 0);
+        if (stored === void 0)
+          lampaStorageSet(STORAGE_KEY_PREFIX + key, !!this.values[key]);
+      });
     }
   };
   var SETTINGS_DEFAULTS = DEFAULTS;
 
   // src/storage/SegmentCache.js
-  var STORAGE_KEY2 = "autoskip_segment_cache";
-  var LEGACY_LOCAL_KEY2 = "autoskip_segment_cache";
+  var STORAGE_KEY = "autoskip_segment_cache";
+  var LEGACY_LOCAL_KEY = "autoskip_segment_cache";
   var MAX_ENTRIES = 50;
   function getLampa3() {
     return typeof Lampa !== "undefined" ? Lampa : null;
   }
-  function safeParse2(raw) {
+  function safeParse(raw) {
     if (!raw || typeof raw !== "string")
       return null;
     try {
@@ -245,11 +255,11 @@
     if (!lampa || !lampa.Storage || typeof lampa.Storage.get !== "function")
       return null;
     try {
-      const value = lampa.Storage.get(STORAGE_KEY2, null);
+      const value = lampa.Storage.get(STORAGE_KEY, null);
       if (value && typeof value === "object")
         return value;
       if (typeof value === "string")
-        return safeParse2(value);
+        return safeParse(value);
     } catch (e) {
     }
     return null;
@@ -258,7 +268,7 @@
     if (typeof window.localStorage === "undefined")
       return null;
     try {
-      return safeParse2(window.localStorage.getItem(LEGACY_LOCAL_KEY2));
+      return safeParse(window.localStorage.getItem(LEGACY_LOCAL_KEY));
     } catch (e) {
       return null;
     }
@@ -268,7 +278,7 @@
     if (!lampa || !lampa.Storage || typeof lampa.Storage.set !== "function")
       return false;
     try {
-      lampa.Storage.set(STORAGE_KEY2, data);
+      lampa.Storage.set(STORAGE_KEY, data);
       return true;
     } catch (e) {
       return false;
@@ -278,7 +288,7 @@
     if (typeof window.localStorage === "undefined")
       return false;
     try {
-      window.localStorage.setItem(STORAGE_KEY2, JSON.stringify(data));
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
       return true;
     } catch (e) {
       return false;
@@ -601,75 +611,9 @@
   }
 
   // src/lampa/settingsUi.js
-  function getLampaSettings() {
-    if (typeof Lampa === "undefined" || !Lampa.Settings)
-      return null;
-    return Lampa.Settings;
-  }
-  function isSettingsApiReady(settings) {
-    if (!settings)
-      return false;
-    const registerMethods = ["addComponent", "register", "registerComponent", "add", "addItem", "component"];
-    const hasMethod = registerMethods.some((method) => typeof settings[method] === "function");
-    const hasArray = Array.isArray(settings.components) || Array.isArray(settings.items);
-    return hasMethod || hasArray;
-  }
-  function registerSettingsComponent({ component, name, icon, onSelect, log, quiet = false }) {
-    const settings = getLampaSettings();
-    if (!settings) {
-      if (!quiet) {
-        log("warn", "Settings UI unavailable (Lampa.Settings missing), plugin continues without menu.");
-      }
-      return false;
-    }
-    const config = { component, name, icon, onSelect };
-    const registerMethods = ["addComponent", "register", "registerComponent", "add", "addItem", "component"];
-    let registered = false;
-    for (const method of registerMethods) {
-      if (typeof settings[method] === "function") {
-        try {
-          settings[method](config);
-          registered = true;
-          break;
-        } catch (err) {
-          log("warn", `Settings.${method} threw:`, err);
-        }
-      }
-    }
-    if (!registered && Array.isArray(settings.components)) {
-      settings.components.push(config);
-      registered = true;
-    }
-    if (!registered && Array.isArray(settings.items)) {
-      settings.items.push(config);
-      registered = true;
-    }
-    if (!registered) {
-      if (!quiet) {
-        log("warn", "Settings API not recognized, skipping settings registration.");
-      }
-      return false;
-    }
-    if (settings.listener && typeof settings.listener.follow === "function") {
-      try {
-        settings.listener.follow("open", (e) => {
-          if (e && e.name === component)
-            onSelect();
-        });
-      } catch (e) {
-      }
-    }
-    return true;
-  }
-  function persistGlobalDisable(value) {
-    try {
-      if (typeof Lampa !== "undefined" && Lampa.Storage && typeof Lampa.Storage.set === "function") {
-        Lampa.Storage.set("autoskip_disabled", !!value);
-      }
-    } catch (e) {
-    }
-  }
-  var SETTING_DEFINITIONS = [
+  var STORAGE_KEY_PREFIX2 = "autoskip_";
+  var GLOBAL_DISABLE_KEY = "autoskip_disabled";
+  var PARAM_DEFINITIONS = [
     { key: "enabled", label: "autoskip_setting_enabled" },
     { key: "autoStart", label: "autoskip_setting_autostart" },
     { key: "skipIntro", label: "autoskip_setting_skip_intro" },
@@ -678,70 +622,118 @@
     { key: "useAniSkip", label: "autoskip_setting_aniskip" },
     { key: "debug", label: "autoskip_setting_debug" }
   ];
-  function escapeAttr(value) {
-    return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  function getLampa6() {
+    return typeof Lampa !== "undefined" ? Lampa : null;
   }
-  function buildSettingsHtml({ name, version, settings }) {
-    const rows = SETTING_DEFINITIONS.map(({ key, label }) => {
-      const checked = settings[key] ? "checked" : "";
-      return `
-      <label style="display:block;margin:6px 0">
-        <input type="checkbox" data-setting="${escapeAttr(key)}" ${checked}/>
-        <span style="margin-left:6px">${escapeAttr(t(label))}</span>
-      </label>
-    `;
-    }).join("");
-    const disableLabel = escapeAttr(t("autoskip_setting_disable"));
-    return `
-    <div id="al-autoskip-settings" style="padding:20px;max-width:420px;color:#fff">
-      <h2 style="color:#FF8A00;margin-top:0">${escapeAttr(name)}</h2>
-      ${rows}
-      <hr style="margin:12px 0;border:0;border-top:1px solid rgba(255,255,255,0.15)"/>
-      <label style="display:block;margin:6px 0">
-        <input type="checkbox" data-global-disable />
-        <span style="margin-left:6px">${disableLabel}</span>
-      </label>
-      <div style="margin-top:10px;font-size:13px;color:#aaa">
-        ${escapeAttr(t("autoskip_settings_version"))}: ${escapeAttr(version)}
-      </div>
-    </div>
-  `;
+  function getSettingsApi() {
+    const lampa = getLampa6();
+    if (!lampa)
+      return null;
+    if (lampa.SettingsApi && typeof lampa.SettingsApi.addComponent === "function")
+      return lampa.SettingsApi;
+    return null;
   }
-  function showSettingsModal({ name, version, settings, onChange, log }) {
-    const html = buildSettingsHtml({ name, version, settings });
-    if (typeof Lampa === "undefined" || !Lampa.Modal) {
-      log("warn", "Settings modal works only inside Lampa.");
-      return;
+  function storageKeyFor(key) {
+    return key === "_global_disable" ? GLOBAL_DISABLE_KEY : `${STORAGE_KEY_PREFIX2}${key}`;
+  }
+  function readStoredValue(key, fallback) {
+    const lampa = getLampa6();
+    if (!lampa || !lampa.Storage || typeof lampa.Storage.field !== "function")
+      return fallback;
+    try {
+      const value = lampa.Storage.field(storageKeyFor(key));
+      if (value === void 0 || value === null || value === "")
+        return fallback;
+      return value;
+    } catch (e) {
+      return fallback;
     }
-    Lampa.Modal.open({
-      title: name,
-      html,
-      onBack: () => {
-        Lampa.Modal.close();
+  }
+  function writeStoredValue(key, value) {
+    const lampa = getLampa6();
+    if (!lampa || !lampa.Storage || typeof lampa.Storage.set !== "function")
+      return;
+    try {
+      lampa.Storage.set(storageKeyFor(key), value);
+    } catch (e) {
+    }
+  }
+  function isSettingsApiReady() {
+    return !!getSettingsApi();
+  }
+  function registerSettingsComponent({ component, name, icon, log, defaults, onChange, quiet = false }) {
+    const api = getSettingsApi();
+    if (!api) {
+      if (!quiet && log)
+        log("warn", "Lampa.SettingsApi unavailable, skipping settings registration.");
+      return false;
+    }
+    try {
+      api.addComponent({ component, name, icon });
+    } catch (e) {
+      if (!quiet && log)
+        log("warn", "SettingsApi.addComponent threw:", e);
+      return false;
+    }
+    if (typeof api.removeParams === "function") {
+      try {
+        api.removeParams(component);
+      } catch (e) {
+      }
+    }
+    PARAM_DEFINITIONS.forEach(({ key, label }) => {
+      const fallback = defaults && key in defaults ? defaults[key] : false;
+      const stored = readStoredValue(key, fallback);
+      const initial = typeof stored === "boolean" ? stored : !!stored;
+      try {
+        api.addParam({
+          component,
+          param: {
+            name: storageKeyFor(key),
+            type: "trigger",
+            default: !!fallback
+          },
+          field: { name: t(label) },
+          onChange: (value) => {
+            const normalized = value === true || value === "true" || value === 1 || value === "1";
+            writeStoredValue(key, normalized);
+            if (onChange) {
+              try {
+                onChange(key, normalized);
+              } catch (err) {
+                if (log)
+                  log("warn", "settings onChange threw", err);
+              }
+            }
+          }
+        });
+      } catch (e) {
+        if (log)
+          log("warn", `SettingsApi.addParam(${key}) threw:`, e);
+      }
+      if (stored === void 0 || stored === null) {
+        writeStoredValue(key, initial);
       }
     });
-    setTimeout(() => {
-      const box = document.querySelector("#al-autoskip-settings");
-      if (!box)
-        return;
-      box.querySelectorAll("[data-setting]").forEach((el) => {
-        el.onchange = (e) => {
-          const key = e.target.dataset.setting;
-          const value = e.target.checked;
-          onChange(key, value);
-        };
-      });
-      const globalDisable = box.querySelector("[data-global-disable]");
-      if (globalDisable) {
-        try {
-          if (typeof Lampa !== "undefined" && Lampa.Storage && typeof Lampa.Storage.field === "function") {
-            globalDisable.checked = Lampa.Storage.field("autoskip_disabled") === true;
-          }
-        } catch (e) {
+    try {
+      api.addParam({
+        component,
+        param: {
+          name: GLOBAL_DISABLE_KEY,
+          type: "trigger",
+          default: false
+        },
+        field: { name: t("autoskip_setting_disable") },
+        onChange: (value) => {
+          const normalized = value === true || value === "true" || value === 1 || value === "1";
+          writeStoredValue("_global_disable", normalized);
         }
-        globalDisable.onchange = (e) => persistGlobalDisable(e.target.checked);
-      }
-    }, 100);
+      });
+    } catch (e) {
+      if (log)
+        log("warn", "SettingsApi.addParam(global disable) threw:", e);
+    }
+    return true;
   }
 
   // src/segments/constants.js
@@ -927,11 +919,11 @@
   };
 
   // src/segments/providers/MetadataProvider.js
-  function getLampa6() {
+  function getLampa7() {
     return typeof Lampa !== "undefined" ? Lampa : null;
   }
   function getPlayerData2() {
-    const lampa = getLampa6();
+    const lampa = getLampa7();
     if (!lampa || !lampa.Player)
       return null;
     try {
@@ -989,7 +981,7 @@
       super({ name: "metadata", log });
     }
     isApplicable() {
-      return !!getLampa6();
+      return !!getLampa7();
     }
     async run(ctx, onUpdate) {
       const ranges = { intro: [], credits: [] };
@@ -1421,11 +1413,11 @@
   // src/segments/providers/AniSkipProvider.js
   var API_BASE = "https://api.aniskip.com/v2/skip-times";
   var FETCH_TIMEOUT_MS = 8e3;
-  function getLampa7() {
+  function getLampa8() {
     return typeof Lampa !== "undefined" ? Lampa : null;
   }
   function getPlayerData3() {
-    const lampa = getLampa7();
+    const lampa = getLampa8();
     if (!lampa || !lampa.Player)
       return null;
     try {
@@ -1440,7 +1432,7 @@
     return null;
   }
   function getActivityCard2() {
-    const lampa = getLampa7();
+    const lampa = getLampa8();
     try {
       if (lampa && lampa.Activity && typeof lampa.Activity.active === "function") {
         const activity = lampa.Activity.active();
@@ -1467,7 +1459,7 @@
     };
   }
   function readUserMap() {
-    const lampa = getLampa7();
+    const lampa = getLampa8();
     if (!lampa || !lampa.Storage || typeof lampa.Storage.get !== "function")
       return null;
     try {
@@ -1780,11 +1772,11 @@
   };
 
   // src/playback/nativeSkipDetect.js
-  function getLampa8() {
+  function getLampa9() {
     return typeof Lampa !== "undefined" ? Lampa : null;
   }
   function getActivityCard3() {
-    const lampa = getLampa8();
+    const lampa = getLampa9();
     try {
       if (lampa && lampa.Activity && typeof lampa.Activity.active === "function") {
         const activity = lampa.Activity.active();
@@ -1796,7 +1788,7 @@
     return null;
   }
   function getPlayerData4() {
-    const lampa = getLampa8();
+    const lampa = getLampa9();
     try {
       if (lampa && lampa.Player && typeof lampa.Player.data === "function")
         return lampa.Player.data();
@@ -1975,7 +1967,7 @@
 
   // src/ui/SkipPrompt/controller.js
   var CONTROLLER_NAME = "autoskip_prompt";
-  function getLampa9() {
+  function getLampa10() {
     return typeof Lampa !== "undefined" ? Lampa : null;
   }
   function getNavigator() {
@@ -2007,7 +1999,7 @@
   function focusElement(el, root) {
     if (!el)
       return;
-    const lampa = getLampa9();
+    const lampa = getLampa10();
     if (lampa && lampa.Controller && typeof lampa.Controller.collectionFocus === "function") {
       try {
         lampa.Controller.collectionFocus(el, root);
@@ -2019,7 +2011,7 @@
     el.classList.add("focus");
   }
   function setCollection(html) {
-    const lampa = getLampa9();
+    const lampa = getLampa10();
     if (!lampa || !lampa.Controller)
       return false;
     if (typeof lampa.Controller.collectionSet !== "function")
@@ -2040,7 +2032,7 @@
       } catch (e) {
       }
     }
-    const lampa = getLampa9();
+    const lampa = getLampa10();
     if (lampa && lampa.Controller && typeof lampa.Controller.move === "function") {
       try {
         lampa.Controller.move(direction);
@@ -2066,7 +2058,7 @@
       this._active = false;
     }
     takeover(initialFocusEl) {
-      const lampa = getLampa9();
+      const lampa = getLampa10();
       if (!lampa || !lampa.Controller || typeof lampa.Controller.add !== "function") {
         focusElement(initialFocusEl, this.root);
         return;
@@ -2140,7 +2132,7 @@
         return;
       }
       this._active = false;
-      const lampa = getLampa9();
+      const lampa = getLampa10();
       if (!lampa || !lampa.Controller || typeof lampa.Controller.toggle !== "function")
         return;
       try {
@@ -2358,7 +2350,7 @@
   // src/core/AutoSkipPlugin.js
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "2.0.0";
+      this.version = "2.0.1";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";
@@ -2448,9 +2440,9 @@
         if (this._settingsRegistered)
           return;
         const isLastAttempt = attempt >= maxAttempts - 1;
-        if (typeof Lampa === "undefined" || !Lampa.Settings || !isSettingsApiReady(Lampa.Settings)) {
+        if (!isSettingsApiReady()) {
           if (isLastAttempt) {
-            this.log("warn", "Settings API not ready, skipping settings registration.");
+            this.log("warn", "Lampa.SettingsApi not ready, skipping settings registration.");
             return;
           }
           setTimeout(() => tryRegister(attempt + 1), retryDelayMs);
@@ -2460,12 +2452,17 @@
           component: this.component,
           name: this.name,
           icon,
-          onSelect: () => this.openSettingsModal(),
+          defaults: SETTINGS_DEFAULTS,
+          onChange: (key, value) => {
+            this.settings[key] = value;
+            this.settingsStore.set(key, value);
+          },
           log: this.log,
           quiet: !isLastAttempt
         });
         if (ok) {
           this._settingsRegistered = true;
+          this.settingsStore.ensureDefaultsPersisted();
           return;
         }
         if (isLastAttempt)
@@ -2473,18 +2470,6 @@
         setTimeout(() => tryRegister(attempt + 1), retryDelayMs);
       };
       tryRegister(0);
-    }
-    openSettingsModal() {
-      showSettingsModal({
-        name: this.name,
-        version: this.version,
-        settings: this.settings,
-        onChange: (key, value) => {
-          this.settings[key] = value;
-          this.settingsStore.set(key, value);
-        },
-        log: this.log
-      });
     }
     listenPlayer() {
       followPlayer({

@@ -1,6 +1,5 @@
-const STORAGE_KEY = 'autoskip_settings';
-const LEGACY_LOCAL_KEY = 'autoskip_settings';
-const LEGACY_LOCAL_KEY_OLD = 'anilibria_autoskip_settings';
+const STORAGE_KEY_PREFIX = 'autoskip_';
+const LEGACY_JSON_KEYS = ['autoskip_settings', 'anilibria_autoskip_settings'];
 
 const DEFAULTS = {
   enabled: true,
@@ -12,73 +11,70 @@ const DEFAULTS = {
   useAniSkip: true
 };
 
+const KEY_ALIASES = {
+  skipOpenings: 'skipIntro',
+  skipEndings: 'skipCredits'
+};
+
 function getLampa() {
   return typeof Lampa !== 'undefined' ? Lampa : null;
 }
 
-function safeParse(raw) {
-  if (!raw || typeof raw !== 'string') return null;
+function lampaStorageGet(key, fallback) {
+  const lampa = getLampa();
+  if (!lampa || !lampa.Storage) return fallback;
   try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') return parsed;
+    if (typeof lampa.Storage.field === 'function') {
+      const value = lampa.Storage.field(key);
+      if (value !== undefined && value !== null && value !== '') return value;
+    }
+    if (typeof lampa.Storage.get === 'function') {
+      const value = lampa.Storage.get(key, fallback);
+      if (value !== undefined && value !== null && value !== '') return value;
+    }
   } catch (e) { /* noop */ }
-  return null;
+  return fallback;
 }
 
-function migrateLegacyKeys(obj) {
-  if (!obj) return null;
-  if (obj.skipOpenings !== undefined && obj.skipIntro === undefined) {
-    obj.skipIntro = obj.skipOpenings;
-  }
-  if (obj.skipEndings !== undefined && obj.skipCredits === undefined) {
-    obj.skipCredits = obj.skipEndings;
-  }
-  return obj;
+function lampaStorageSet(key, value) {
+  const lampa = getLampa();
+  if (!lampa || !lampa.Storage || typeof lampa.Storage.set !== 'function') return false;
+  try { lampa.Storage.set(key, value); return true; } catch (e) { return false; }
 }
 
-function readFromLocalStorage() {
-  if (typeof window.localStorage === 'undefined') return null;
-  for (const key of [LEGACY_LOCAL_KEY, LEGACY_LOCAL_KEY_OLD]) {
+function lampaStorageRemove(key) {
+  const lampa = getLampa();
+  if (!lampa || !lampa.Storage) return;
+  try {
+    if (typeof lampa.Storage.set === 'function') lampa.Storage.set(key, '');
+  } catch (e) { /* noop */ }
+}
+
+function readLegacyJson() {
+  if (typeof window === 'undefined' || !window.localStorage) return null;
+  for (const key of LEGACY_JSON_KEYS) {
     try {
-      const parsed = safeParse(window.localStorage.getItem(key));
-      if (parsed) return migrateLegacyKeys(parsed);
+      const raw = window.localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') return { key, data: parsed };
     } catch (e) { /* noop */ }
   }
   return null;
 }
 
-function readFromLampaStorage() {
-  const lampa = getLampa();
-  if (!lampa || !lampa.Storage) return null;
-  try {
-    if (typeof lampa.Storage.get === 'function') {
-      const value = lampa.Storage.get(STORAGE_KEY, null);
-      if (value && typeof value === 'object') return migrateLegacyKeys(value);
-      if (typeof value === 'string') return migrateLegacyKeys(safeParse(value));
-    }
-  } catch (e) { /* noop */ }
-  return null;
+function clearLegacyJson(key) {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try { window.localStorage.removeItem(key); } catch (e) { /* noop */ }
 }
 
-function writeToLampaStorage(obj) {
-  const lampa = getLampa();
-  if (!lampa || !lampa.Storage || typeof lampa.Storage.set !== 'function') return false;
-  try {
-    lampa.Storage.set(STORAGE_KEY, obj);
-    return true;
-  } catch (e) {
-    return false;
+function applyAliases(obj) {
+  if (!obj) return obj;
+  const out = Object.assign({}, obj);
+  for (const [from, to] of Object.entries(KEY_ALIASES)) {
+    if (out[from] !== undefined && out[to] === undefined) out[to] = out[from];
   }
-}
-
-function writeToLocalStorage(obj) {
-  if (typeof window.localStorage === 'undefined') return false;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
-    return true;
-  } catch (e) {
-    return false;
-  }
+  return out;
 }
 
 export class SettingsStore {
@@ -91,22 +87,30 @@ export class SettingsStore {
   load() {
     if (this._loaded) return this.values;
 
-    let stored = readFromLampaStorage();
-    let migratedFromLocal = false;
-
-    if (!stored) {
-      stored = readFromLocalStorage();
-      if (stored) migratedFromLocal = true;
+    const legacy = readLegacyJson();
+    if (legacy) {
+      const aliased = applyAliases(legacy.data);
+      Object.keys(DEFAULTS).forEach((key) => {
+        if (aliased[key] !== undefined) {
+          lampaStorageSet(STORAGE_KEY_PREFIX + key, !!aliased[key]);
+        }
+      });
+      const legacyCacheJson = (() => {
+        try { return window.localStorage.getItem('autoskip_segment_cache'); }
+        catch (e) { return null; }
+      })();
+      if (legacyCacheJson) lampaStorageSet('autoskip_segment_cache_legacy', legacyCacheJson);
+      clearLegacyJson(legacy.key);
+      if (this.log) this.log('log', `settings migrated from localStorage[${legacy.key}] to Lampa.Storage`);
     }
 
-    if (stored) Object.assign(this.values, stored);
+    Object.keys(DEFAULTS).forEach((key) => {
+      const stored = lampaStorageGet(STORAGE_KEY_PREFIX + key, undefined);
+      if (stored === undefined) return;
+      this.values[key] = !!stored;
+    });
+
     this._loaded = true;
-
-    if (migratedFromLocal) {
-      this.save();
-      if (this.log) this.log('log', 'settings migrated from localStorage to Lampa.Storage');
-    }
-
     return this.values;
   }
 
@@ -123,20 +127,21 @@ export class SettingsStore {
   set(key, value) {
     if (!this._loaded) this.load();
     this.values[key] = value;
-    this.save();
+    if (key in DEFAULTS) lampaStorageSet(STORAGE_KEY_PREFIX + key, value);
   }
 
   update(patch) {
-    if (!this._loaded) this.load();
-    Object.assign(this.values, patch || {});
-    this.save();
+    Object.keys(patch || {}).forEach((key) => this.set(key, patch[key]));
   }
 
-  save() {
-    if (!writeToLampaStorage(this.values)) {
-      writeToLocalStorage(this.values);
-    }
+  ensureDefaultsPersisted() {
+    if (!this._loaded) this.load();
+    Object.keys(DEFAULTS).forEach((key) => {
+      const stored = lampaStorageGet(STORAGE_KEY_PREFIX + key, undefined);
+      if (stored === undefined) lampaStorageSet(STORAGE_KEY_PREFIX + key, !!this.values[key]);
+    });
   }
 }
 
 export const SETTINGS_DEFAULTS = DEFAULTS;
+export { STORAGE_KEY_PREFIX };

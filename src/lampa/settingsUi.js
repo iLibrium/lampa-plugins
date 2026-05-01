@@ -1,80 +1,9 @@
 import { t as translate } from '../util/i18n.js';
 
-function getLampaSettings() {
-  if (typeof Lampa === 'undefined' || !Lampa.Settings) return null;
-  return Lampa.Settings;
-}
+const STORAGE_KEY_PREFIX = 'autoskip_';
+const GLOBAL_DISABLE_KEY = 'autoskip_disabled';
 
-export function isSettingsApiReady(settings) {
-  if (!settings) return false;
-  const registerMethods = ['addComponent', 'register', 'registerComponent', 'add', 'addItem', 'component'];
-  const hasMethod = registerMethods.some((method) => typeof settings[method] === 'function');
-  const hasArray = Array.isArray(settings.components) || Array.isArray(settings.items);
-  return hasMethod || hasArray;
-}
-
-export function registerSettingsComponent({ component, name, icon, onSelect, log, quiet = false }) {
-  const settings = getLampaSettings();
-  if (!settings) {
-    if (!quiet) {
-      log('warn', 'Settings UI unavailable (Lampa.Settings missing), plugin continues without menu.');
-    }
-    return false;
-  }
-
-  const config = { component, name, icon, onSelect };
-
-  const registerMethods = ['addComponent', 'register', 'registerComponent', 'add', 'addItem', 'component'];
-  let registered = false;
-  for (const method of registerMethods) {
-    if (typeof settings[method] === 'function') {
-      try {
-        settings[method](config);
-        registered = true;
-        break;
-      } catch (err) {
-        log('warn', `Settings.${method} threw:`, err);
-      }
-    }
-  }
-
-  if (!registered && Array.isArray(settings.components)) {
-    settings.components.push(config);
-    registered = true;
-  }
-
-  if (!registered && Array.isArray(settings.items)) {
-    settings.items.push(config);
-    registered = true;
-  }
-
-  if (!registered) {
-    if (!quiet) {
-      log('warn', 'Settings API not recognized, skipping settings registration.');
-    }
-    return false;
-  }
-
-  if (settings.listener && typeof settings.listener.follow === 'function') {
-    try {
-      settings.listener.follow('open', (e) => {
-        if (e && e.name === component) onSelect();
-      });
-    } catch (e) { /* noop */ }
-  }
-
-  return true;
-}
-
-function persistGlobalDisable(value) {
-  try {
-    if (typeof Lampa !== 'undefined' && Lampa.Storage && typeof Lampa.Storage.set === 'function') {
-      Lampa.Storage.set('autoskip_disabled', !!value);
-    }
-  } catch (e) { /* noop */ }
-}
-
-const SETTING_DEFINITIONS = [
+const PARAM_DEFINITIONS = [
   { key: 'enabled', label: 'autoskip_setting_enabled' },
   { key: 'autoStart', label: 'autoskip_setting_autostart' },
   { key: 'skipIntro', label: 'autoskip_setting_skip_intro' },
@@ -84,75 +13,121 @@ const SETTING_DEFINITIONS = [
   { key: 'debug', label: 'autoskip_setting_debug' }
 ];
 
-function escapeAttr(value) {
-  return String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+function getLampa() {
+  return typeof Lampa !== 'undefined' ? Lampa : null;
 }
 
-function buildSettingsHtml({ name, version, settings }) {
-  const rows = SETTING_DEFINITIONS.map(({ key, label }) => {
-    const checked = settings[key] ? 'checked' : '';
-    return `
-      <label style="display:block;margin:6px 0">
-        <input type="checkbox" data-setting="${escapeAttr(key)}" ${checked}/>
-        <span style="margin-left:6px">${escapeAttr(translate(label))}</span>
-      </label>
-    `;
-  }).join('');
-
-  const disableLabel = escapeAttr(translate('autoskip_setting_disable'));
-
-  return `
-    <div id="al-autoskip-settings" style="padding:20px;max-width:420px;color:#fff">
-      <h2 style="color:#FF8A00;margin-top:0">${escapeAttr(name)}</h2>
-      ${rows}
-      <hr style="margin:12px 0;border:0;border-top:1px solid rgba(255,255,255,0.15)"/>
-      <label style="display:block;margin:6px 0">
-        <input type="checkbox" data-global-disable />
-        <span style="margin-left:6px">${disableLabel}</span>
-      </label>
-      <div style="margin-top:10px;font-size:13px;color:#aaa">
-        ${escapeAttr(translate('autoskip_settings_version'))}: ${escapeAttr(version)}
-      </div>
-    </div>
-  `;
+function getSettingsApi() {
+  const lampa = getLampa();
+  if (!lampa) return null;
+  if (lampa.SettingsApi && typeof lampa.SettingsApi.addComponent === 'function') return lampa.SettingsApi;
+  return null;
 }
 
-export function showSettingsModal({ name, version, settings, onChange, log }) {
-  const html = buildSettingsHtml({ name, version, settings });
+function storageKeyFor(key) {
+  return key === '_global_disable' ? GLOBAL_DISABLE_KEY : `${STORAGE_KEY_PREFIX}${key}`;
+}
 
-  if (typeof Lampa === 'undefined' || !Lampa.Modal) {
-    log('warn', 'Settings modal works only inside Lampa.');
-    return;
+function readStoredValue(key, fallback) {
+  const lampa = getLampa();
+  if (!lampa || !lampa.Storage || typeof lampa.Storage.field !== 'function') return fallback;
+  try {
+    const value = lampa.Storage.field(storageKeyFor(key));
+    if (value === undefined || value === null || value === '') return fallback;
+    return value;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function writeStoredValue(key, value) {
+  const lampa = getLampa();
+  if (!lampa || !lampa.Storage || typeof lampa.Storage.set !== 'function') return;
+  try { lampa.Storage.set(storageKeyFor(key), value); } catch (e) { /* noop */ }
+}
+
+export function isSettingsApiReady() {
+  return !!getSettingsApi();
+}
+
+export function registerSettingsComponent({ component, name, icon, log, defaults, onChange, quiet = false }) {
+  const api = getSettingsApi();
+  if (!api) {
+    if (!quiet && log) log('warn', 'Lampa.SettingsApi unavailable, skipping settings registration.');
+    return false;
   }
 
-  Lampa.Modal.open({
-    title: name,
-    html,
-    onBack: () => {
-      Lampa.Modal.close();
+  try {
+    api.addComponent({ component, name, icon });
+  } catch (e) {
+    if (!quiet && log) log('warn', 'SettingsApi.addComponent threw:', e);
+    return false;
+  }
+
+  if (typeof api.removeParams === 'function') {
+    try { api.removeParams(component); } catch (e) { /* noop */ }
+  }
+
+  PARAM_DEFINITIONS.forEach(({ key, label }) => {
+    const fallback = defaults && key in defaults ? defaults[key] : false;
+    const stored = readStoredValue(key, fallback);
+    const initial = typeof stored === 'boolean' ? stored : !!stored;
+    try {
+      api.addParam({
+        component,
+        param: {
+          name: storageKeyFor(key),
+          type: 'trigger',
+          default: !!fallback
+        },
+        field: { name: translate(label) },
+        onChange: (value) => {
+          const normalized = value === true || value === 'true' || value === 1 || value === '1';
+          writeStoredValue(key, normalized);
+          if (onChange) {
+            try { onChange(key, normalized); } catch (err) { if (log) log('warn', 'settings onChange threw', err); }
+          }
+        }
+      });
+    } catch (e) {
+      if (log) log('warn', `SettingsApi.addParam(${key}) threw:`, e);
+    }
+
+    if (stored === undefined || stored === null) {
+      writeStoredValue(key, initial);
     }
   });
 
-  setTimeout(() => {
-    const box = document.querySelector('#al-autoskip-settings');
-    if (!box) return;
-
-    box.querySelectorAll('[data-setting]').forEach((el) => {
-      el.onchange = (e) => {
-        const key = e.target.dataset.setting;
-        const value = e.target.checked;
-        onChange(key, value);
-      };
+  try {
+    api.addParam({
+      component,
+      param: {
+        name: GLOBAL_DISABLE_KEY,
+        type: 'trigger',
+        default: false
+      },
+      field: { name: translate('autoskip_setting_disable') },
+      onChange: (value) => {
+        const normalized = value === true || value === 'true' || value === 1 || value === '1';
+        writeStoredValue('_global_disable', normalized);
+      }
     });
+  } catch (e) {
+    if (log) log('warn', 'SettingsApi.addParam(global disable) threw:', e);
+  }
 
-    const globalDisable = box.querySelector('[data-global-disable]');
-    if (globalDisable) {
-      try {
-        if (typeof Lampa !== 'undefined' && Lampa.Storage && typeof Lampa.Storage.field === 'function') {
-          globalDisable.checked = Lampa.Storage.field('autoskip_disabled') === true;
-        }
-      } catch (e) { /* noop */ }
-      globalDisable.onchange = (e) => persistGlobalDisable(e.target.checked);
-    }
-  }, 100);
+  return true;
+}
+
+export function readSettingsFromStorage(defaults) {
+  const result = Object.assign({}, defaults || {});
+  PARAM_DEFINITIONS.forEach(({ key }) => {
+    const stored = readStoredValue(key, undefined);
+    if (stored !== undefined) result[key] = !!stored;
+  });
+  return result;
+}
+
+export function showSettingsModal(/* legacy */) {
+  // Kept for backward compatibility — Lampa renders settings page automatically.
 }
