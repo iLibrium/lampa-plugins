@@ -12,52 +12,478 @@
     };
   }
 
-  // src/core/storage.js
-  var SETTINGS_KEY = "autoskip_settings";
-  var LEGACY_SETTINGS_KEY = "anilibria_autoskip_settings";
-  var SEGMENT_CACHE_KEY = "autoskip_segment_cache";
-  function safeParseJson(value, fallback) {
+  // src/core/capabilities.js
+  function getLampa() {
+    return typeof Lampa !== "undefined" ? Lampa : null;
+  }
+  function probeAudioContext() {
+    return typeof (window.AudioContext || window.webkitAudioContext) === "function";
+  }
+  function probeAudioWorklet() {
+    return typeof window.AudioWorkletNode !== "undefined";
+  }
+  function probeIndexedDB() {
+    if (typeof window.indexedDB === "undefined")
+      return false;
     try {
-      const parsed = JSON.parse(value);
+      const probe2 = window.indexedDB.open("autoskip_capability_probe", 1);
+      probe2.onsuccess = () => {
+        try {
+          probe2.result && probe2.result.close();
+        } catch (e) {
+        }
+        try {
+          window.indexedDB.deleteDatabase("autoskip_capability_probe");
+        } catch (e) {
+        }
+      };
+      probe2.onerror = () => {
+      };
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  function probeLocalStorage() {
+    try {
+      const k = "__autoskip_probe__";
+      window.localStorage.setItem(k, "1");
+      window.localStorage.removeItem(k);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  function probeIsTV() {
+    const lampa = getLampa();
+    try {
+      if (lampa && lampa.Platform && typeof lampa.Platform.screen === "function") {
+        return lampa.Platform.screen("tv");
+      }
+    } catch (e) {
+    }
+    return false;
+  }
+  function probe() {
+    const lampa = getLampa();
+    return {
+      audioContext: probeAudioContext(),
+      audioWorklet: probeAudioWorklet(),
+      indexedDB: probeIndexedDB(),
+      localStorage: probeLocalStorage(),
+      lampaStorage: !!(lampa && lampa.Storage),
+      lampaController: !!(lampa && lampa.Controller && typeof lampa.Controller.add === "function"),
+      lampaLang: !!(lampa && lampa.Lang),
+      isTV: probeIsTV()
+    };
+  }
+
+  // src/storage/SettingsStore.js
+  var STORAGE_KEY = "autoskip_settings";
+  var LEGACY_LOCAL_KEY = "autoskip_settings";
+  var LEGACY_LOCAL_KEY_OLD = "anilibria_autoskip_settings";
+  var DEFAULTS = {
+    enabled: true,
+    autoStart: true,
+    skipIntro: true,
+    skipCredits: true,
+    showNotifications: true,
+    debug: false,
+    useAniSkip: true
+  };
+  function getLampa2() {
+    return typeof Lampa !== "undefined" ? Lampa : null;
+  }
+  function safeParse(raw) {
+    if (!raw || typeof raw !== "string")
+      return null;
+    try {
+      const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object")
         return parsed;
-      return fallback;
     } catch (e) {
-      return fallback;
+    }
+    return null;
+  }
+  function migrateLegacyKeys(obj) {
+    if (!obj)
+      return null;
+    if (obj.skipOpenings !== void 0 && obj.skipIntro === void 0) {
+      obj.skipIntro = obj.skipOpenings;
+    }
+    if (obj.skipEndings !== void 0 && obj.skipCredits === void 0) {
+      obj.skipCredits = obj.skipEndings;
+    }
+    return obj;
+  }
+  function readFromLocalStorage() {
+    if (typeof window.localStorage === "undefined")
+      return null;
+    for (const key of [LEGACY_LOCAL_KEY, LEGACY_LOCAL_KEY_OLD]) {
+      try {
+        const parsed = safeParse(window.localStorage.getItem(key));
+        if (parsed)
+          return migrateLegacyKeys(parsed);
+      } catch (e) {
+      }
+    }
+    return null;
+  }
+  function readFromLampaStorage() {
+    const lampa = getLampa2();
+    if (!lampa || !lampa.Storage)
+      return null;
+    try {
+      if (typeof lampa.Storage.get === "function") {
+        const value = lampa.Storage.get(STORAGE_KEY, null);
+        if (value && typeof value === "object")
+          return migrateLegacyKeys(value);
+        if (typeof value === "string")
+          return migrateLegacyKeys(safeParse(value));
+      }
+    } catch (e) {
+    }
+    return null;
+  }
+  function writeToLampaStorage(obj) {
+    const lampa = getLampa2();
+    if (!lampa || !lampa.Storage || typeof lampa.Storage.set !== "function")
+      return false;
+    try {
+      lampa.Storage.set(STORAGE_KEY, obj);
+      return true;
+    } catch (e) {
+      return false;
     }
   }
-  function loadSettings(storage = localStorage) {
-    const stored = safeParseJson(storage.getItem(SETTINGS_KEY) || "{}", {});
-    if (stored && typeof stored === "object") {
-      if (stored.skipOpenings !== void 0 && stored.skipIntro === void 0) {
-        stored.skipIntro = stored.skipOpenings;
-      }
-      if (stored.skipEndings !== void 0 && stored.skipCredits === void 0) {
-        stored.skipCredits = stored.skipEndings;
-      }
-      if (Object.keys(stored).length)
-        return stored;
+  function writeToLocalStorage(obj) {
+    if (typeof window.localStorage === "undefined")
+      return false;
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+      return true;
+    } catch (e) {
+      return false;
     }
-    const legacy = safeParseJson(storage.getItem(LEGACY_SETTINGS_KEY) || "{}", {});
-    if (legacy && typeof legacy === "object") {
-      if (legacy.skipOpenings !== void 0 && legacy.skipIntro === void 0) {
-        legacy.skipIntro = legacy.skipOpenings;
-      }
-      if (legacy.skipEndings !== void 0 && legacy.skipCredits === void 0) {
-        legacy.skipCredits = legacy.skipEndings;
-      }
-      return legacy;
+  }
+  var SettingsStore = class {
+    constructor({ log = null } = {}) {
+      this.log = log;
+      this.values = Object.assign({}, DEFAULTS);
+      this._loaded = false;
     }
-    return {};
+    load() {
+      if (this._loaded)
+        return this.values;
+      let stored = readFromLampaStorage();
+      let migratedFromLocal = false;
+      if (!stored) {
+        stored = readFromLocalStorage();
+        if (stored)
+          migratedFromLocal = true;
+      }
+      if (stored)
+        Object.assign(this.values, stored);
+      this._loaded = true;
+      if (migratedFromLocal) {
+        this.save();
+        if (this.log)
+          this.log("log", "settings migrated from localStorage to Lampa.Storage");
+      }
+      return this.values;
+    }
+    get(key) {
+      if (!this._loaded)
+        this.load();
+      return this.values[key];
+    }
+    all() {
+      if (!this._loaded)
+        this.load();
+      return this.values;
+    }
+    set(key, value) {
+      if (!this._loaded)
+        this.load();
+      this.values[key] = value;
+      this.save();
+    }
+    update(patch) {
+      if (!this._loaded)
+        this.load();
+      Object.assign(this.values, patch || {});
+      this.save();
+    }
+    save() {
+      if (!writeToLampaStorage(this.values)) {
+        writeToLocalStorage(this.values);
+      }
+    }
+  };
+  var SETTINGS_DEFAULTS = DEFAULTS;
+
+  // src/storage/SegmentCache.js
+  var STORAGE_KEY2 = "autoskip_segment_cache";
+  var LEGACY_LOCAL_KEY2 = "autoskip_segment_cache";
+  var MAX_ENTRIES = 50;
+  function getLampa3() {
+    return typeof Lampa !== "undefined" ? Lampa : null;
   }
-  function saveSettings(settings, storage = localStorage) {
-    storage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  function safeParse2(raw) {
+    if (!raw || typeof raw !== "string")
+      return null;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object")
+        return parsed;
+    } catch (e) {
+    }
+    return null;
   }
-  function loadSegmentCache(storage = localStorage) {
-    return safeParseJson(storage.getItem(SEGMENT_CACHE_KEY) || "{}", {});
+  function readLampa() {
+    const lampa = getLampa3();
+    if (!lampa || !lampa.Storage || typeof lampa.Storage.get !== "function")
+      return null;
+    try {
+      const value = lampa.Storage.get(STORAGE_KEY2, null);
+      if (value && typeof value === "object")
+        return value;
+      if (typeof value === "string")
+        return safeParse2(value);
+    } catch (e) {
+    }
+    return null;
   }
-  function saveSegmentCache(cache, storage = localStorage) {
-    storage.setItem(SEGMENT_CACHE_KEY, JSON.stringify(cache));
+  function readLocal() {
+    if (typeof window.localStorage === "undefined")
+      return null;
+    try {
+      return safeParse2(window.localStorage.getItem(LEGACY_LOCAL_KEY2));
+    } catch (e) {
+      return null;
+    }
+  }
+  function writeLampa(data) {
+    const lampa = getLampa3();
+    if (!lampa || !lampa.Storage || typeof lampa.Storage.set !== "function")
+      return false;
+    try {
+      lampa.Storage.set(STORAGE_KEY2, data);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  function writeLocal(data) {
+    if (typeof window.localStorage === "undefined")
+      return false;
+    try {
+      window.localStorage.setItem(STORAGE_KEY2, JSON.stringify(data));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  function pruneOldest(data, maxEntries) {
+    const keys = Object.keys(data);
+    if (keys.length <= maxEntries)
+      return;
+    keys.sort((a, b) => (data[a].ts || 0) - (data[b].ts || 0));
+    for (let i = 0; i < keys.length - maxEntries; i += 1) {
+      delete data[keys[i]];
+    }
+  }
+  var SegmentCache = class {
+    constructor({ log = null, maxEntries = MAX_ENTRIES } = {}) {
+      this.log = log;
+      this.maxEntries = maxEntries;
+      this.data = {};
+      this._loaded = false;
+      this._saveTimer = null;
+    }
+    load() {
+      if (this._loaded)
+        return this.data;
+      let stored = readLampa();
+      let migrated = false;
+      if (!stored) {
+        stored = readLocal();
+        if (stored)
+          migrated = true;
+      }
+      if (stored)
+        this.data = stored;
+      this._loaded = true;
+      if (migrated) {
+        this.save();
+        if (this.log)
+          this.log("log", "segment cache migrated from localStorage to Lampa.Storage");
+      }
+      return this.data;
+    }
+    read(key) {
+      if (!this._loaded)
+        this.load();
+      if (!key)
+        return null;
+      return this.data[key] || null;
+    }
+    write(key, ranges, meta = {}) {
+      if (!key)
+        return;
+      if (!ranges)
+        return;
+      const intro = Array.isArray(ranges.intro) ? ranges.intro : [];
+      const credits = Array.isArray(ranges.credits) ? ranges.credits : [];
+      if (!intro.length && !credits.length)
+        return;
+      if (!this._loaded)
+        this.load();
+      this.data[key] = Object.assign({}, this.data[key] || {}, {
+        intro: intro.slice(),
+        credits: credits.slice(),
+        ts: Date.now()
+      }, meta || {});
+      pruneOldest(this.data, this.maxEntries);
+    }
+    markValidated(key) {
+      if (!key)
+        return;
+      if (!this._loaded)
+        this.load();
+      if (!this.data[key])
+        return;
+      this.data[key].validated = true;
+      this.data[key].ts = Date.now();
+    }
+    scheduleSave(delayMs = 1500) {
+      if (this._saveTimer)
+        return;
+      this._saveTimer = setTimeout(() => this.save(), delayMs);
+    }
+    save() {
+      if (this._saveTimer) {
+        clearTimeout(this._saveTimer);
+        this._saveTimer = null;
+      }
+      if (!this._loaded)
+        return;
+      if (!writeLampa(this.data))
+        writeLocal(this.data);
+    }
+  };
+
+  // src/segments/contentId.js
+  function getLampa4() {
+    return typeof Lampa !== "undefined" ? Lampa : null;
+  }
+  function getPlayerData() {
+    const lampa = getLampa4();
+    if (!lampa || !lampa.Player)
+      return null;
+    try {
+      if (typeof lampa.Player.data === "function")
+        return lampa.Player.data();
+      if (typeof lampa.Player.get === "function")
+        return lampa.Player.get();
+      if (lampa.Player.current)
+        return lampa.Player.current;
+      if (lampa.Player.item)
+        return lampa.Player.item;
+    } catch (e) {
+    }
+    return null;
+  }
+  function getActivityCard() {
+    const lampa = getLampa4();
+    try {
+      if (lampa && lampa.Activity && typeof lampa.Activity.active === "function") {
+        const activity = lampa.Activity.active();
+        if (activity && activity.card)
+          return activity.card;
+      }
+    } catch (e) {
+    }
+    return null;
+  }
+  function pickFirstFinite(...values) {
+    for (const value of values) {
+      const num = Number(value);
+      if (Number.isFinite(num) && num >= 0)
+        return num;
+    }
+    return null;
+  }
+  function roundDuration(duration, bucketSec = 30) {
+    if (!Number.isFinite(duration) || duration <= 0)
+      return 0;
+    return Math.round(duration / bucketSec) * bucketSec;
+  }
+  function legacyKey(video) {
+    if (!video)
+      return null;
+    const src = video.currentSrc || video.src || "";
+    const duration = Number.isFinite(video.duration) ? Math.round(video.duration * 10) / 10 : null;
+    if (!src || duration === null)
+      return null;
+    return `${src}::${duration}`;
+  }
+  function getContentId(video) {
+    if (!video)
+      return { primary: null, legacy: null };
+    const data = getPlayerData() || {};
+    const card = data.movie || data.card || getActivityCard() || {};
+    const tmdb = card.id || card.tmdb_id || data.id || null;
+    const season = pickFirstFinite(
+      data.season_number,
+      data.season,
+      data.s,
+      card.season_number,
+      card.season
+    );
+    const episode = pickFirstFinite(
+      data.episode_number,
+      data.episode,
+      data.e,
+      card.episode_number,
+      card.episode
+    );
+    const duration = roundDuration(video.duration, 30);
+    const legacy = legacyKey(video);
+    if (tmdb) {
+      const s = season === null ? 0 : season;
+      const e = episode === null ? 0 : episode;
+      return { primary: `tmdb:${tmdb}:s${s}:e${e}:d${duration}`, legacy };
+    }
+    if (legacy)
+      return { primary: `src:${legacy}`, legacy };
+    return { primary: null, legacy };
+  }
+
+  // src/lampa/playerEvents.js
+  function getListener() {
+    if (typeof Lampa === "undefined")
+      return null;
+    if (!Lampa.Player || !Lampa.Player.listener)
+      return null;
+    if (typeof Lampa.Player.listener.follow !== "function")
+      return null;
+    return Lampa.Player.listener;
+  }
+  function followPlayer(events) {
+    const listener = getListener();
+    if (!listener)
+      return false;
+    Object.keys(events || {}).forEach((eventName) => {
+      const handler = events[eventName];
+      if (typeof handler !== "function")
+        return;
+      try {
+        listener.follow(eventName, handler);
+      } catch (e) {
+      }
+    });
+    return true;
   }
 
   // src/lampa/waitForLampa.js
@@ -92,6 +518,88 @@
     check();
   }
 
+  // src/util/i18n.js
+  var FALLBACK = {
+    ru: {
+      autoskip_name: "AutoSkip",
+      autoskip_skip: "Пропустить",
+      autoskip_cancel: "Отменить",
+      autoskip_intro_skipped: "Пропущено вступление",
+      autoskip_credits_skipped: "Пропущены титры",
+      autoskip_setting_enabled: "Включить AutoSkip",
+      autoskip_setting_autostart: "Автозапуск",
+      autoskip_setting_skip_intro: "Пропускать вступление",
+      autoskip_setting_skip_credits: "Пропускать титры",
+      autoskip_setting_notifications: "Показывать уведомления",
+      autoskip_setting_debug: "Debug-логи",
+      autoskip_setting_disable: "Отключить плагин",
+      autoskip_setting_aniskip: "Использовать AniSkip API для аниме",
+      autoskip_settings_version: "Версия"
+    },
+    en: {
+      autoskip_name: "AutoSkip",
+      autoskip_skip: "Skip",
+      autoskip_cancel: "Cancel",
+      autoskip_intro_skipped: "Intro skipped",
+      autoskip_credits_skipped: "Credits skipped",
+      autoskip_setting_enabled: "Enable AutoSkip",
+      autoskip_setting_autostart: "Autostart",
+      autoskip_setting_skip_intro: "Skip intro",
+      autoskip_setting_skip_credits: "Skip credits",
+      autoskip_setting_notifications: "Show notifications",
+      autoskip_setting_debug: "Debug logs",
+      autoskip_setting_disable: "Disable plugin",
+      autoskip_setting_aniskip: "Use AniSkip API for anime",
+      autoskip_settings_version: "Version"
+    }
+  };
+  function getLampa5() {
+    return typeof Lampa !== "undefined" ? Lampa : null;
+  }
+  function detectLang() {
+    const lampa = getLampa5();
+    if (lampa && lampa.Storage && typeof lampa.Storage.field === "function") {
+      const fromStore = lampa.Storage.field("language");
+      if (fromStore && FALLBACK[fromStore])
+        return fromStore;
+    }
+    return "ru";
+  }
+  function t(key) {
+    const lampa = getLampa5();
+    if (lampa && lampa.Lang && typeof lampa.Lang.translate === "function") {
+      try {
+        const v = lampa.Lang.translate(key);
+        if (v && v !== key)
+          return v;
+      } catch (e) {
+      }
+    }
+    const lang = detectLang();
+    return FALLBACK[lang] && FALLBACK[lang][key] || FALLBACK.ru[key] || key;
+  }
+  function registerTranslations() {
+    const lampa = getLampa5();
+    if (!lampa || !lampa.Lang)
+      return false;
+    const langs = Object.keys(FALLBACK);
+    if (typeof lampa.Lang.add === "function") {
+      const dict = {};
+      for (const key of Object.keys(FALLBACK.ru)) {
+        dict[key] = {};
+        for (const lang of langs) {
+          dict[key][lang] = FALLBACK[lang][key];
+        }
+      }
+      try {
+        lampa.Lang.add(dict);
+        return true;
+      } catch (e) {
+      }
+    }
+    return false;
+  }
+
   // src/lampa/settingsUi.js
   function getLampaSettings() {
     if (typeof Lampa === "undefined" || !Lampa.Settings)
@@ -114,12 +622,7 @@
       }
       return false;
     }
-    const config = {
-      component,
-      name,
-      icon,
-      onSelect
-    };
+    const config = { component, name, icon, onSelect };
     const registerMethods = ["addComponent", "register", "registerComponent", "add", "addItem", "component"];
     let registered = false;
     for (const method of registerMethods) {
@@ -148,26 +651,64 @@
       return false;
     }
     if (settings.listener && typeof settings.listener.follow === "function") {
-      settings.listener.follow("open", (e) => {
-        if (e.name === component)
-          onSelect();
-      });
+      try {
+        settings.listener.follow("open", (e) => {
+          if (e && e.name === component)
+            onSelect();
+        });
+      } catch (e) {
+      }
     }
     return true;
   }
-  function showSettingsModal({ name, version, settings, onChange, log }) {
-    const html = `
-    <div id="al-autoskip-settings" style="padding:20px;max-width:400px;color:#fff">
-      <h2 style="color:#4CAF50">${name}</h2>
-      <label><input type="checkbox" data-setting="enabled" ${settings.enabled ? "checked" : ""}/> Включить AutoSkip</label><br>
-      <label><input type="checkbox" data-setting="autoStart" ${settings.autoStart ? "checked" : ""}/> Автозапуск</label><br>
-      <label><input type="checkbox" data-setting="skipIntro" ${settings.skipIntro ? "checked" : ""}/> Пропускать вступление</label><br>
-      <label><input type="checkbox" data-setting="skipCredits" ${settings.skipCredits ? "checked" : ""}/> Пропускать титры</label><br>
-      <label><input type="checkbox" data-setting="showNotifications" ${settings.showNotifications ? "checked" : ""}/> Показывать уведомления</label><br>
-      <label><input type="checkbox" data-setting="debug" ${settings.debug ? "checked" : ""}/> Debug-логи</label><br>
-      <div style="margin-top:10px;font-size:13px;color:#aaa">Версия: ${version}</div>
+  function persistGlobalDisable(value) {
+    try {
+      if (typeof Lampa !== "undefined" && Lampa.Storage && typeof Lampa.Storage.set === "function") {
+        Lampa.Storage.set("autoskip_disabled", !!value);
+      }
+    } catch (e) {
+    }
+  }
+  var SETTING_DEFINITIONS = [
+    { key: "enabled", label: "autoskip_setting_enabled" },
+    { key: "autoStart", label: "autoskip_setting_autostart" },
+    { key: "skipIntro", label: "autoskip_setting_skip_intro" },
+    { key: "skipCredits", label: "autoskip_setting_skip_credits" },
+    { key: "showNotifications", label: "autoskip_setting_notifications" },
+    { key: "useAniSkip", label: "autoskip_setting_aniskip" },
+    { key: "debug", label: "autoskip_setting_debug" }
+  ];
+  function escapeAttr(value) {
+    return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+  }
+  function buildSettingsHtml({ name, version, settings }) {
+    const rows = SETTING_DEFINITIONS.map(({ key, label }) => {
+      const checked = settings[key] ? "checked" : "";
+      return `
+      <label style="display:block;margin:6px 0">
+        <input type="checkbox" data-setting="${escapeAttr(key)}" ${checked}/>
+        <span style="margin-left:6px">${escapeAttr(t(label))}</span>
+      </label>
+    `;
+    }).join("");
+    const disableLabel = escapeAttr(t("autoskip_setting_disable"));
+    return `
+    <div id="al-autoskip-settings" style="padding:20px;max-width:420px;color:#fff">
+      <h2 style="color:#FF8A00;margin-top:0">${escapeAttr(name)}</h2>
+      ${rows}
+      <hr style="margin:12px 0;border:0;border-top:1px solid rgba(255,255,255,0.15)"/>
+      <label style="display:block;margin:6px 0">
+        <input type="checkbox" data-global-disable />
+        <span style="margin-left:6px">${disableLabel}</span>
+      </label>
+      <div style="margin-top:10px;font-size:13px;color:#aaa">
+        ${escapeAttr(t("autoskip_settings_version"))}: ${escapeAttr(version)}
+      </div>
     </div>
   `;
+  }
+  function showSettingsModal({ name, version, settings, onChange, log }) {
+    const html = buildSettingsHtml({ name, version, settings });
     if (typeof Lampa === "undefined" || !Lampa.Modal) {
       log("warn", "Settings modal works only inside Lampa.");
       return;
@@ -190,41 +731,17 @@
           onChange(key, value);
         };
       });
+      const globalDisable = box.querySelector("[data-global-disable]");
+      if (globalDisable) {
+        try {
+          if (typeof Lampa !== "undefined" && Lampa.Storage && typeof Lampa.Storage.field === "function") {
+            globalDisable.checked = Lampa.Storage.field("autoskip_disabled") === true;
+          }
+        } catch (e) {
+        }
+        globalDisable.onchange = (e) => persistGlobalDisable(e.target.checked);
+      }
     }, 100);
-  }
-
-  // src/segments/cache.js
-  function getCacheKey(video) {
-    if (!video)
-      return null;
-    const src = video.currentSrc || video.src || "";
-    const duration = Number.isFinite(video.duration) ? Math.round(video.duration * 10) / 10 : null;
-    if (!src || duration === null)
-      return null;
-    return `${src}::${duration}`;
-  }
-  function readCachedRanges(cache, key) {
-    if (!cache || !key)
-      return null;
-    return cache[key] || null;
-  }
-  function writeCachedRanges(cache, key, ranges, { maxEntries = 50 } = {}) {
-    if (!cache || !key)
-      return;
-    if (!ranges || (!ranges.intro || !ranges.intro.length) && (!ranges.credits || !ranges.credits.length))
-      return;
-    cache[key] = {
-      intro: ranges.intro.slice(),
-      credits: ranges.credits.slice(),
-      ts: Date.now()
-    };
-    const keys = Object.keys(cache);
-    if (keys.length <= maxEntries)
-      return;
-    keys.sort((a, b) => (cache[a].ts || 0) - (cache[b].ts || 0));
-    for (let i = 0; i < keys.length - maxEntries; i += 1) {
-      delete cache[keys[i]];
-    }
   }
 
   // src/segments/constants.js
@@ -315,276 +832,135 @@
     return true;
   }
 
-  // src/segments/providers/audioDetector.js
-  var AudioSegmentDetector = class {
-    constructor({ config, onUpdate, log }) {
-      this.config = config;
-      this.onUpdate = onUpdate;
-      this.log = log;
-      this.video = null;
-      this.audioContext = null;
-      this.audioSourceNode = null;
-      this.audioProcessorNode = null;
-      this.audioPassthroughNode = null;
-      this.silentGainNode = null;
-      this.audioAnalysisState = null;
-      this._bindedOnPlayForAudio = null;
-      this._bindedOnSeeking = null;
-      this._lastRanges = null;
+  // src/segments/SegmentResolver.js
+  var SOURCE_PRIORITY = {
+    cache: 0,
+    audio: 1,
+    chapters: 2,
+    metadata: 3,
+    aniskip: 4
+  };
+  var VALIDATION_BONUS = 100;
+  var VALIDATION_TOLERANCE_SEC = 2;
+  function priorityOf(source, validated) {
+    const base = SOURCE_PRIORITY[source];
+    const value = base === void 0 ? 0 : base;
+    return validated ? value + VALIDATION_BONUS : value;
+  }
+  function rangesOverlapWithin(a, b, tolerance) {
+    if (!a || !b || !a.length || !b.length)
+      return false;
+    const ra = a[0];
+    const rb = b[0];
+    return Math.abs(ra.start - rb.start) <= tolerance && Math.abs(ra.end - rb.end) <= tolerance;
+  }
+  var SegmentResolver = class {
+    constructor() {
+      this.ranges = { intro: [], credits: [] };
+      this.sources = { intro: null, credits: null };
+      this.validated = { intro: false, credits: false };
     }
-    start(video) {
-      if (!video)
-        return;
-      if (this.audioContext)
-        return;
-      this.video = video;
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      if (!AudioCtx) {
-        this.log("warn", "AudioContext not available, audio-based skip disabled.");
-        return;
-      }
-      try {
-        this.audioContext = new AudioCtx({ latencyHint: "interactive" });
-      } catch (e) {
-        this.log("warn", "Failed to start AudioContext:", e);
-        this.audioContext = null;
-        return;
-      }
-      this.audioAnalysisState = {
-        currentSumSq: 0,
-        currentSamples: 0,
-        windows: [],
-        windowSamples: Math.max(1, Math.floor(this.config.windowSec * this.audioContext.sampleRate))
-      };
-      try {
-        this.audioSourceNode = this.audioContext.createMediaElementSource(video);
-      } catch (e) {
-        this.log("warn", "Cannot create media source:", e);
-        this.stop();
-        return;
-      }
-      const bufferSize = 2048;
-      const inputChannels = Math.max(1, this.audioSourceNode.channelCount || 2);
-      this.audioProcessorNode = this.audioContext.createScriptProcessor(bufferSize, inputChannels, inputChannels);
-      this.audioProcessorNode.onaudioprocess = (event) => this.handleAudioProcess(event);
-      this.silentGainNode = this.audioContext.createGain();
-      this.silentGainNode.gain.value = 0;
-      this.audioPassthroughNode = this.audioContext.createGain();
-      this.audioPassthroughNode.gain.value = 1;
-      try {
-        this.audioSourceNode.connect(this.audioProcessorNode);
-        this.audioProcessorNode.connect(this.silentGainNode);
-        this.silentGainNode.connect(this.audioContext.destination);
-        this.audioSourceNode.connect(this.audioPassthroughNode);
-        this.audioPassthroughNode.connect(this.audioContext.destination);
-      } catch (e) {
-        this.log("warn", "Cannot wire audio nodes:", e);
-        this.stop();
-        return;
-      }
-      this.log("log", "audio analysis started", {
-        sampleRate: this.audioContext.sampleRate,
-        bufferSize,
-        windowSec: this.config.windowSec
-      });
-      const resumeContext = () => {
-        if (!this.audioContext)
-          return;
-        if (this.audioContext.state === "suspended") {
-          this.audioContext.resume().catch(() => {
-          });
-        }
-      };
-      resumeContext();
-      this._bindedOnPlayForAudio = resumeContext;
-      video.addEventListener("play", this._bindedOnPlayForAudio);
-      this._bindedOnSeeking = () => this.resetAudioWindowAccumulator();
-      video.addEventListener("seeking", this._bindedOnSeeking);
+    reset() {
+      this.ranges = { intro: [], credits: [] };
+      this.sources = { intro: null, credits: null };
+      this.validated = { intro: false, credits: false };
     }
-    stop() {
-      if (this.audioProcessorNode) {
-        try {
-          this.audioProcessorNode.disconnect();
-        } catch (e) {
-        }
-      }
-      if (this.audioSourceNode) {
-        try {
-          this.audioSourceNode.disconnect();
-        } catch (e) {
-        }
-      }
-      if (this.silentGainNode) {
-        try {
-          this.silentGainNode.disconnect();
-        } catch (e) {
-        }
-      }
-      if (this.audioPassthroughNode) {
-        try {
-          this.audioPassthroughNode.disconnect();
-        } catch (e) {
-        }
-      }
-      if (this.audioContext) {
-        try {
-          this.audioContext.close();
-        } catch (e) {
-        }
-      }
-      if (this.video && this._bindedOnPlayForAudio) {
-        this.video.removeEventListener("play", this._bindedOnPlayForAudio);
-      }
-      if (this.video && this._bindedOnSeeking) {
-        this.video.removeEventListener("seeking", this._bindedOnSeeking);
-      }
-      this.video = null;
-      this.audioContext = null;
-      this.audioSourceNode = null;
-      this.audioProcessorNode = null;
-      this.audioPassthroughNode = null;
-      this.silentGainNode = null;
-      this.audioAnalysisState = null;
-      this._bindedOnPlayForAudio = null;
-      this._bindedOnSeeking = null;
-      this._lastRanges = null;
+    apply(source, normalized) {
+      const introUpdated = this._applyKind(source, "intro", normalized.intro);
+      const creditsUpdated = this._applyKind(source, "credits", normalized.credits);
+      return introUpdated || creditsUpdated;
     }
-    resetAudioWindowAccumulator() {
-      if (!this.audioAnalysisState)
-        return;
-      this.audioAnalysisState.currentSamples = 0;
-      this.audioAnalysisState.currentSumSq = 0;
-    }
-    handleAudioProcess(event) {
-      if (!this.audioAnalysisState || !this.video)
-        return;
-      const inputBuffer = event.inputBuffer;
-      if (!inputBuffer)
-        return;
-      const channelCount = inputBuffer.numberOfChannels;
-      if (!channelCount)
-        return;
-      const length = inputBuffer.length;
-      const channels = [];
-      for (let c = 0; c < channelCount; c += 1) {
-        channels.push(inputBuffer.getChannelData(c));
-      }
-      const state = this.audioAnalysisState;
-      const windowSamples = state.windowSamples;
-      for (let i = 0; i < length; i += 1) {
-        let sample = 0;
-        for (let c = 0; c < channelCount; c += 1) {
-          sample += channels[c][i];
+    _applyKind(source, kind, incoming) {
+      if (!incoming || !incoming.length)
+        return false;
+      const incomingPriority = priorityOf(source, false);
+      const currentSource = this.sources[kind];
+      const currentValidated = this.validated[kind];
+      const currentPriority = currentSource ? priorityOf(currentSource, currentValidated) : -1;
+      if (this.ranges[kind].length && rangesOverlapWithin(this.ranges[kind], incoming, VALIDATION_TOLERANCE_SEC)) {
+        if (currentSource && currentSource !== source && source !== "cache") {
+          this.validated[kind] = true;
         }
-        sample /= channelCount;
-        state.currentSumSq += sample * sample;
-        state.currentSamples += 1;
-        if (state.currentSamples >= windowSamples) {
-          const rms = Math.sqrt(state.currentSumSq / state.currentSamples);
-          const endTime = this.video.currentTime;
-          const startTime = Math.max(0, endTime - this.config.windowSec);
-          state.windows.push({ start: startTime, end: endTime, rms });
-          this.trimAudioWindows();
-          this.updateSegmentsFromAudio();
-          state.currentSumSq = 0;
-          state.currentSamples = 0;
-        }
+        return false;
       }
+      const shouldReplace = !this.ranges[kind].length || incomingPriority >= currentPriority;
+      if (!shouldReplace)
+        return false;
+      if (rangesEqual(this.ranges[kind], incoming))
+        return false;
+      this.ranges[kind] = incoming;
+      this.sources[kind] = source;
+      this.validated[kind] = source === "cache" ? currentValidated : false;
+      return true;
     }
-    trimAudioWindows() {
-      if (!this.audioAnalysisState)
-        return;
-      const maxWindows = 3600;
-      if (this.audioAnalysisState.windows.length > maxWindows) {
-        const excess = this.audioAnalysisState.windows.length - maxWindows;
-        this.audioAnalysisState.windows.splice(0, excess);
-      }
+    getRanges() {
+      return this.ranges;
     }
-    updateSegmentsFromAudio() {
-      if (!this.audioAnalysisState || !this.video)
-        return;
-      const duration = this.video.duration;
-      if (!Number.isFinite(duration) || duration <= 0)
-        return;
-      const windows = this.audioAnalysisState.windows;
-      if (!windows.length)
-        return;
-      const baselineSize = Math.min(this.config.baselineWindows, windows.length);
-      const baselineSlice = windows.slice(-baselineSize);
-      const values = baselineSlice.map((w) => w.rms);
-      const median = computeMedian(values);
-      let mad = computeMedian(values.map((v) => Math.abs(v - median)));
-      if (!Number.isFinite(mad) || mad < 1e-7) {
-        const variance = values.reduce((s, v) => s + (v - median) * (v - median), 0) / Math.max(values.length, 1);
-        mad = Math.sqrt(Math.max(variance, 0)) / 1.4826 || 1e-6;
-      }
-      const thresh = this.config.zThreshold * mad * 1.4826;
-      const flagged = [];
-      for (let i = 0; i < windows.length; i += 1) {
-        const w = windows[i];
-        const outlier = Math.abs(w.rms - median) > thresh;
-        if (outlier)
-          flagged.push({ start: w.start, end: w.end });
-      }
-      const merged = mergeSegments(flagged, this.config.mergeGapSec);
-      const filtered = merged.filter((seg) => seg.end - seg.start >= this.config.minSegmentSec);
-      if (!filtered.length)
-        return;
-      const introCandidates = filtered.filter((seg) => seg.start <= duration * 0.35).sort((a, b) => a.start - b.start);
-      const creditsCandidates = filtered.filter((seg) => seg.end >= duration * 0.65).sort((a, b) => a.start - b.start);
-      const newRanges = { intro: [], credits: [] };
-      if (introCandidates.length)
-        newRanges.intro.push(introCandidates[0]);
-      if (creditsCandidates.length)
-        newRanges.credits.push(creditsCandidates[creditsCandidates.length - 1]);
-      if (!newRanges.intro.length && !newRanges.credits.length)
-        return;
-      if (this._lastRanges) {
-        const sameIntro = rangesEqual(this._lastRanges.intro, newRanges.intro);
-        const sameCredits = rangesEqual(this._lastRanges.credits, newRanges.credits);
-        if (sameIntro && sameCredits)
-          return;
-      }
-      this._lastRanges = newRanges;
-      this.onUpdate(newRanges, {
-        windows: windows.length,
-        baseline: {
-          size: baselineSize,
-          median,
-          mad,
-          threshold: thresh,
-          windowSec: this.config.windowSec,
-          minSegmentSec: this.config.minSegmentSec,
-          mergeGapSec: this.config.mergeGapSec
-        },
-        candidates: filtered.length
-      });
+    getSources() {
+      return this.sources;
+    }
+    isValidated(kind) {
+      return !!this.validated[kind];
     }
   };
 
-  // src/segments/providers/playerData.js
-  function getPlayerData(lampa = null) {
-    const resolved = lampa || (typeof Lampa !== "undefined" ? Lampa : null);
-    const player = resolved && resolved.Player ? resolved.Player : null;
-    if (!player)
+  // src/segments/providers/ProviderBase.js
+  var ProviderBase = class {
+    constructor({ name, log }) {
+      this.name = name;
+      this.log = log || (() => {
+      });
+      this.cancelled = false;
+    }
+    isApplicable() {
+      return true;
+    }
+    async run() {
+      throw new Error(`${this.name}: run() not implemented`);
+    }
+    cancel() {
+      this.cancelled = true;
+    }
+    reset() {
+      this.cancelled = false;
+    }
+  };
+
+  // src/segments/providers/MetadataProvider.js
+  function getLampa6() {
+    return typeof Lampa !== "undefined" ? Lampa : null;
+  }
+  function getPlayerData2() {
+    const lampa = getLampa6();
+    if (!lampa || !lampa.Player)
       return null;
-    if (typeof player.get === "function")
-      return player.get();
-    if (typeof player.data === "function")
-      return player.data();
-    if (player.current)
-      return player.current;
-    if (player.item)
-      return player.item;
+    try {
+      if (typeof lampa.Player.get === "function")
+        return lampa.Player.get();
+      if (typeof lampa.Player.data === "function")
+        return lampa.Player.data();
+      if (lampa.Player.current)
+        return lampa.Player.current;
+      if (lampa.Player.item)
+        return lampa.Player.item;
+    } catch (e) {
+    }
     return null;
   }
-  function getRangesFromPlayerData(lampa = null) {
-    const ranges = { intro: [], credits: [] };
-    const data = getPlayerData(lampa);
-    if (!data)
-      return ranges;
-    extractRangesFromObject(data, ranges, 0);
-    return ranges;
+  function normalizeRangeValue(value) {
+    if (Array.isArray(value) && value.length >= 2) {
+      const start = Number(value[0]);
+      const end = Number(value[1]);
+      if (Number.isFinite(start) && Number.isFinite(end))
+        return { start, end };
+    }
+    if (typeof value === "object" && value) {
+      const start = Number(value.start !== void 0 ? value.start : value.begin !== void 0 ? value.begin : value.from);
+      const end = Number(value.end !== void 0 ? value.end : value.finish !== void 0 ? value.finish : value.to);
+      if (Number.isFinite(start) && Number.isFinite(end))
+        return { start, end };
+    }
+    return null;
   }
   function extractRangesFromObject(data, ranges, depth) {
     if (!data || depth > 3)
@@ -608,222 +984,1454 @@
       }
     });
   }
-  function normalizeRangeValue(value) {
-    var _a, _b, _c, _d;
-    if (Array.isArray(value) && value.length >= 2) {
-      const start = Number(value[0]);
-      const end = Number(value[1]);
-      if (Number.isFinite(start) && Number.isFinite(end))
-        return { start, end };
+  var MetadataProvider = class extends ProviderBase {
+    constructor({ log }) {
+      super({ name: "metadata", log });
     }
-    if (typeof value === "object") {
-      const start = Number((_b = (_a = value.start) != null ? _a : value.begin) != null ? _b : value.from);
-      const end = Number((_d = (_c = value.end) != null ? _c : value.finish) != null ? _d : value.to);
-      if (Number.isFinite(start) && Number.isFinite(end))
-        return { start, end };
+    isApplicable() {
+      return !!getLampa6();
     }
-    return null;
-  }
+    async run(ctx, onUpdate) {
+      const ranges = { intro: [], credits: [] };
+      const data = getPlayerData2();
+      if (!data)
+        return;
+      extractRangesFromObject(data, ranges, 0);
+      if (!ranges.intro.length && !ranges.credits.length)
+        return;
+      if (this.cancelled)
+        return;
+      onUpdate(ranges, { passive: true });
+    }
+  };
 
-  // src/segments/providers/textTracks.js
-  function getRangesFromTextTracks(video) {
-    const ranges = { intro: [], credits: [] };
-    if (!video || !video.textTracks)
-      return ranges;
-    for (let i = 0; i < video.textTracks.length; i += 1) {
-      const track = video.textTracks[i];
-      const kind = track.kind || "";
-      if (!["chapters", "metadata", "subtitles"].includes(kind))
-        continue;
-      const cues = track.cues || [];
-      for (let j = 0; j < cues.length; j += 1) {
-        const cue = cues[j];
-        const text = `${cue.id || ""} ${cue.text || ""}`.trim();
-        if (INTRO_REGEX.test(text)) {
-          ranges.intro.push({ start: cue.startTime, end: cue.endTime });
-        } else if (CREDITS_REGEX.test(text)) {
-          ranges.credits.push({ start: cue.startTime, end: cue.endTime });
+  // src/segments/providers/ChaptersProvider.js
+  var ChaptersProvider = class extends ProviderBase {
+    constructor({ log }) {
+      super({ name: "chapters", log });
+    }
+    isApplicable(ctx) {
+      return !!(ctx && ctx.video && ctx.video.textTracks && ctx.video.textTracks.length);
+    }
+    async run(ctx, onUpdate) {
+      const video = ctx && ctx.video;
+      if (!video || !video.textTracks)
+        return;
+      const ranges = { intro: [], credits: [] };
+      const tracks = video.textTracks;
+      for (let i = 0; i < tracks.length; i += 1) {
+        const track = tracks[i];
+        const kind = track.kind || "";
+        if (!["chapters", "metadata", "subtitles"].includes(kind))
+          continue;
+        const cues = track.cues || [];
+        for (let j = 0; j < cues.length; j += 1) {
+          const cue = cues[j];
+          const text = `${cue.id || ""} ${cue.text || ""}`.trim();
+          if (INTRO_REGEX.test(text)) {
+            ranges.intro.push({ start: cue.startTime, end: cue.endTime });
+          } else if (CREDITS_REGEX.test(text)) {
+            ranges.credits.push({ start: cue.startTime, end: cue.endTime });
+          }
+        }
+      }
+      if (!ranges.intro.length && !ranges.credits.length)
+        return;
+      if (this.cancelled)
+        return;
+      onUpdate(ranges, { passive: true });
+    }
+  };
+
+  // src/segments/providers/AudioProvider.js
+  var DEFAULT_CONFIG = {
+    windowSec: 0.5,
+    baselineWindows: 120,
+    zThreshold: 1.4,
+    minSegmentSec: 8,
+    mergeGapSec: 1,
+    introMaxFraction: 0.25,
+    creditsMinFraction: 0.75,
+    fftSize: 2048,
+    voiceMusicMaxRatio: 0.4,
+    silenceProbeWindows: 20,
+    silenceProbeRmsThreshold: 1e-6
+  };
+  var VOICE_BAND_LO = 200;
+  var VOICE_BAND_HI = 3e3;
+  var FULL_BAND_HI = 12e3;
+  function clampFreqIndex(freqHz, sampleRate, binCount) {
+    if (!Number.isFinite(freqHz) || sampleRate <= 0 || binCount <= 0)
+      return 0;
+    const idx = Math.round(freqHz / (sampleRate / 2) * binCount);
+    return Math.max(0, Math.min(binCount - 1, idx));
+  }
+  var AudioProvider = class extends ProviderBase {
+    constructor({ log, config = {}, onUpdate }) {
+      super({ name: "audio", log });
+      this.config = Object.assign({}, DEFAULT_CONFIG, config);
+      this.onUpdate = onUpdate || (() => {
+      });
+      this.video = null;
+      this.audioContext = null;
+      this.sourceNode = null;
+      this.processorNode = null;
+      this.analyserNode = null;
+      this.silentGainNode = null;
+      this.state = null;
+      this.spectralBuffer = null;
+      this._onSeeking = null;
+      this._onPlay = null;
+      this._lastEmitted = null;
+      this._silenceProbeRemaining = 0;
+      this._taintedDetected = false;
+    }
+    isApplicable(ctx) {
+      if (!ctx || !ctx.video)
+        return false;
+      if (ctx.capabilities && ctx.capabilities.audioContext === false)
+        return false;
+      return true;
+    }
+    async run(ctx) {
+      this.start(ctx.video);
+    }
+    start(video) {
+      if (!video)
+        return;
+      if (this.audioContext)
+        return;
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) {
+        this.log("warn", "AudioContext not available, audio-based skip disabled.");
+        return;
+      }
+      this.video = video;
+      try {
+        this.audioContext = new AudioCtx({ latencyHint: "interactive" });
+      } catch (e) {
+        this.log("warn", "Failed to start AudioContext:", e);
+        this.audioContext = null;
+        return;
+      }
+      this.state = {
+        currentSumSq: 0,
+        currentSamples: 0,
+        windows: [],
+        windowSamples: Math.max(1, Math.floor(this.config.windowSec * this.audioContext.sampleRate))
+      };
+      this._lastEmitted = null;
+      this._silenceProbeRemaining = this.config.silenceProbeWindows;
+      this._taintedDetected = false;
+      try {
+        this.sourceNode = this.audioContext.createMediaElementSource(video);
+      } catch (e) {
+        this.log("warn", "Cannot create media source:", e);
+        this.stop();
+        return;
+      }
+      const inputChannels = Math.max(1, this.sourceNode.channelCount || 2);
+      this.processorNode = this.audioContext.createScriptProcessor(2048, inputChannels, inputChannels);
+      this.processorNode.onaudioprocess = (event) => this._handleProcess(event);
+      this.analyserNode = this.audioContext.createAnalyser();
+      this.analyserNode.fftSize = this.config.fftSize;
+      this.analyserNode.smoothingTimeConstant = 0.5;
+      this.spectralBuffer = new Float32Array(this.analyserNode.frequencyBinCount);
+      this.silentGainNode = this.audioContext.createGain();
+      this.silentGainNode.gain.value = 0;
+      try {
+        this.sourceNode.connect(this.audioContext.destination);
+        this.sourceNode.connect(this.analyserNode);
+        this.sourceNode.connect(this.processorNode);
+        this.processorNode.connect(this.silentGainNode);
+        this.silentGainNode.connect(this.audioContext.destination);
+      } catch (e) {
+        this.log("warn", "Cannot wire audio nodes:", e);
+        this.stop();
+        return;
+      }
+      if (this.audioContext.state === "suspended") {
+        this.audioContext.resume().catch(() => {
+        });
+      }
+      this._onPlay = () => {
+        if (this.audioContext && this.audioContext.state === "suspended") {
+          this.audioContext.resume().catch(() => {
+          });
+        }
+      };
+      this._onSeeking = () => this.resetWindowAccumulator();
+      video.addEventListener("play", this._onPlay);
+      video.addEventListener("seeking", this._onSeeking);
+      this.log("log", "audio analysis started", {
+        sampleRate: this.audioContext.sampleRate,
+        windowSec: this.config.windowSec
+      });
+    }
+    stop() {
+      [this.processorNode, this.sourceNode, this.silentGainNode, this.analyserNode].forEach((node) => {
+        if (!node)
+          return;
+        try {
+          node.disconnect();
+        } catch (e) {
+        }
+      });
+      if (this.audioContext) {
+        try {
+          this.audioContext.close();
+        } catch (e) {
+        }
+      }
+      if (this.video && this._onPlay) {
+        try {
+          this.video.removeEventListener("play", this._onPlay);
+        } catch (e) {
+        }
+      }
+      if (this.video && this._onSeeking) {
+        try {
+          this.video.removeEventListener("seeking", this._onSeeking);
+        } catch (e) {
+        }
+      }
+      this.video = null;
+      this.audioContext = null;
+      this.sourceNode = null;
+      this.processorNode = null;
+      this.analyserNode = null;
+      this.silentGainNode = null;
+      this.state = null;
+      this.spectralBuffer = null;
+      this._onPlay = null;
+      this._onSeeking = null;
+      this._lastEmitted = null;
+    }
+    cancel() {
+      super.cancel();
+      this.stop();
+    }
+    resetWindowAccumulator() {
+      if (!this.state)
+        return;
+      this.state.currentSamples = 0;
+      this.state.currentSumSq = 0;
+    }
+    resetSession() {
+      if (!this.state)
+        return;
+      this.state.currentSamples = 0;
+      this.state.currentSumSq = 0;
+      this.state.windows = [];
+      this._lastEmitted = null;
+      this._silenceProbeRemaining = this.config.silenceProbeWindows;
+    }
+    _handleProcess(event) {
+      if (!this.state || !this.video)
+        return;
+      const inputBuffer = event.inputBuffer;
+      if (!inputBuffer)
+        return;
+      const channelCount = inputBuffer.numberOfChannels;
+      if (!channelCount)
+        return;
+      const length = inputBuffer.length;
+      const channels = [];
+      for (let c = 0; c < channelCount; c += 1) {
+        channels.push(inputBuffer.getChannelData(c));
+      }
+      const state = this.state;
+      const windowSamples = state.windowSamples;
+      for (let i = 0; i < length; i += 1) {
+        let sample = 0;
+        for (let c = 0; c < channelCount; c += 1)
+          sample += channels[c][i];
+        sample /= channelCount;
+        state.currentSumSq += sample * sample;
+        state.currentSamples += 1;
+        if (state.currentSamples >= windowSamples) {
+          const rms = Math.sqrt(state.currentSumSq / state.currentSamples);
+          const endTime = this.video.currentTime;
+          const startTime = Math.max(0, endTime - this.config.windowSec);
+          const voiceRatio = this._computeVoiceRatio();
+          state.windows.push({ start: startTime, end: endTime, rms, voiceRatio });
+          this._trimWindows();
+          this._handleSilenceProbe(rms);
+          if (!this._taintedDetected)
+            this._updateSegments();
+          state.currentSumSq = 0;
+          state.currentSamples = 0;
         }
       }
     }
-    return ranges;
+    _handleSilenceProbe(rms) {
+      if (this._silenceProbeRemaining <= 0)
+        return;
+      this._silenceProbeRemaining -= 1;
+      if (rms > this.config.silenceProbeRmsThreshold) {
+        this._silenceProbeRemaining = 0;
+        return;
+      }
+      if (this._silenceProbeRemaining === 0) {
+        this._taintedDetected = true;
+        this.log("warn", "audio tainted (CORS) or silent stream — provider disabled.");
+        this.cancel();
+      }
+    }
+    _computeVoiceRatio() {
+      if (!this.analyserNode || !this.spectralBuffer)
+        return null;
+      try {
+        this.analyserNode.getFloatFrequencyData(this.spectralBuffer);
+      } catch (e) {
+        return null;
+      }
+      const sampleRate = this.audioContext ? this.audioContext.sampleRate : 48e3;
+      const binCount = this.spectralBuffer.length;
+      const loIdx = clampFreqIndex(VOICE_BAND_LO, sampleRate, binCount);
+      const hiIdx = clampFreqIndex(VOICE_BAND_HI, sampleRate, binCount);
+      const fullHiIdx = clampFreqIndex(FULL_BAND_HI, sampleRate, binCount);
+      let voiceEnergy = 0;
+      let fullEnergy = 0;
+      for (let i = 1; i < fullHiIdx; i += 1) {
+        const dB = this.spectralBuffer[i];
+        if (!Number.isFinite(dB))
+          continue;
+        const linear = Math.pow(10, dB / 20);
+        fullEnergy += linear;
+        if (i >= loIdx && i <= hiIdx)
+          voiceEnergy += linear;
+      }
+      if (fullEnergy <= 0)
+        return null;
+      return voiceEnergy / fullEnergy;
+    }
+    _trimWindows() {
+      if (!this.state)
+        return;
+      const maxWindows = 3600;
+      if (this.state.windows.length > maxWindows) {
+        const excess = this.state.windows.length - maxWindows;
+        this.state.windows.splice(0, excess);
+      }
+    }
+    _updateSegments() {
+      if (!this.state || !this.video)
+        return;
+      const duration = this.video.duration;
+      if (!Number.isFinite(duration) || duration <= 0)
+        return;
+      const windows = this.state.windows;
+      if (!windows.length)
+        return;
+      const baselineSize = Math.min(this.config.baselineWindows, windows.length);
+      const baselineSlice = windows.slice(-baselineSize);
+      const values = baselineSlice.map((w) => w.rms);
+      const median = computeMedian(values);
+      let mad = computeMedian(values.map((v) => Math.abs(v - median)));
+      if (!Number.isFinite(mad) || mad < 1e-7) {
+        const variance = values.reduce((s, v) => s + (v - median) * (v - median), 0) / Math.max(values.length, 1);
+        mad = Math.sqrt(Math.max(variance, 0)) / 1.4826 || 1e-6;
+      }
+      const thresh = this.config.zThreshold * mad * 1.4826;
+      const flagged = [];
+      for (let i = 0; i < windows.length; i += 1) {
+        const w = windows[i];
+        const rmsOutlier = Math.abs(w.rms - median) > thresh;
+        const voiceLow = w.voiceRatio !== null && w.voiceRatio < this.config.voiceMusicMaxRatio;
+        if (rmsOutlier && voiceLow)
+          flagged.push({ start: w.start, end: w.end });
+      }
+      const merged = mergeSegments(flagged, this.config.mergeGapSec);
+      const filtered = merged.filter((seg) => seg.end - seg.start >= this.config.minSegmentSec);
+      if (!filtered.length)
+        return;
+      const introCutoff = duration * this.config.introMaxFraction;
+      const creditsCutoff = duration * this.config.creditsMinFraction;
+      const introCandidates = filtered.filter((seg) => seg.start <= introCutoff).sort((a, b) => a.start - b.start);
+      const creditsCandidates = filtered.filter((seg) => seg.end >= creditsCutoff).sort((a, b) => a.start - b.start);
+      const newRanges = { intro: [], credits: [] };
+      if (introCandidates.length)
+        newRanges.intro.push(introCandidates[0]);
+      if (creditsCandidates.length)
+        newRanges.credits.push(creditsCandidates[creditsCandidates.length - 1]);
+      if (!newRanges.intro.length && !newRanges.credits.length)
+        return;
+      if (this._lastEmitted) {
+        const sameIntro = rangesEqual(this._lastEmitted.intro, newRanges.intro);
+        const sameCredits = rangesEqual(this._lastEmitted.credits, newRanges.credits);
+        if (sameIntro && sameCredits)
+          return;
+      }
+      this._lastEmitted = newRanges;
+      this.onUpdate(newRanges, {
+        windows: windows.length,
+        baseline: { size: baselineSize, median, mad, threshold: thresh },
+        candidates: filtered.length
+      });
+    }
+  };
+
+  // src/segments/providers/aniskip/tmdbToMal.js
+  var TMDB_TO_MAL = {
+    // Attack on Titan / Атака титанов
+    1429: 16498,
+    // Demon Slayer / Клинок, рассекающий демонов
+    85937: 38e3,
+    // Jujutsu Kaisen / Магическая битва
+    95479: 40748,
+    // My Hero Academia / Моя геройская академия
+    65930: 31964,
+    // One Punch Man / Ванпанчмен
+    63926: 30276,
+    // Death Note / Тетрадь смерти
+    13916: 1535,
+    // Steins;Gate
+    31910: 9253,
+    // Code Geass / Код Гиасс
+    16245: 1575,
+    // Naruto Shippuden / Наруто: Ураганные хроники
+    46260: 1735,
+    // Bleach: Thousand-Year Blood War
+    118646: 41467,
+    // Spy x Family
+    120089: 50265,
+    // Chainsaw Man
+    114410: 44511,
+    // Re:Zero
+    65840: 31240,
+    // Mob Psycho 100
+    65786: 32182,
+    // Vinland Saga
+    82684: 37521,
+    // Made in Abyss
+    72636: 34599,
+    // Konosuba
+    65754: 30831,
+    // Mushoku Tensei
+    104134: 39535,
+    // Solo Leveling
+    127532: 52299,
+    // Frieren / Провожающая в последний путь Фрирен
+    209867: 52991,
+    // Cyberpunk: Edgerunners
+    105248: 42310
+  };
+
+  // src/segments/providers/AniSkipProvider.js
+  var API_BASE = "https://api.aniskip.com/v2/skip-times";
+  var FETCH_TIMEOUT_MS = 8e3;
+  function getLampa7() {
+    return typeof Lampa !== "undefined" ? Lampa : null;
+  }
+  function getPlayerData3() {
+    const lampa = getLampa7();
+    if (!lampa || !lampa.Player)
+      return null;
+    try {
+      if (typeof lampa.Player.data === "function")
+        return lampa.Player.data();
+      if (typeof lampa.Player.get === "function")
+        return lampa.Player.get();
+      if (lampa.Player.current)
+        return lampa.Player.current;
+    } catch (e) {
+    }
+    return null;
+  }
+  function getActivityCard2() {
+    const lampa = getLampa7();
+    try {
+      if (lampa && lampa.Activity && typeof lampa.Activity.active === "function") {
+        const activity = lampa.Activity.active();
+        if (activity && activity.card)
+          return activity.card;
+      }
+    } catch (e) {
+    }
+    return null;
+  }
+  function getCardSnapshot() {
+    const data = getPlayerData3() || {};
+    const card = data.movie || data.card || getActivityCard2() || {};
+    const tmdb = Number(card.id || card.tmdb_id || data.id || NaN);
+    const season = Number(data.season_number !== void 0 ? data.season_number : data.season);
+    const episode = Number(data.episode_number !== void 0 ? data.episode_number : data.episode);
+    return {
+      tmdb: Number.isFinite(tmdb) && tmdb > 0 ? tmdb : null,
+      season: Number.isFinite(season) ? season : null,
+      episode: Number.isFinite(episode) ? episode : null,
+      originalLanguage: card.original_language || null,
+      genreIds: Array.isArray(card.genre_ids) ? card.genre_ids : [],
+      title: card.original_name || card.name || card.title || ""
+    };
+  }
+  function readUserMap() {
+    const lampa = getLampa7();
+    if (!lampa || !lampa.Storage || typeof lampa.Storage.get !== "function")
+      return null;
+    try {
+      const raw = lampa.Storage.get("autoskip_aniskip_map", null);
+      if (!raw)
+        return null;
+      if (typeof raw === "object")
+        return raw;
+      if (typeof raw === "string")
+        return JSON.parse(raw);
+    } catch (e) {
+    }
+    return null;
+  }
+  function resolveMalId(tmdbId) {
+    if (!tmdbId)
+      return null;
+    const userMap = readUserMap();
+    if (userMap && userMap[tmdbId] != null) {
+      const num = Number(userMap[tmdbId]);
+      if (Number.isFinite(num) && num > 0)
+        return num;
+    }
+    if (TMDB_TO_MAL[tmdbId] != null)
+      return TMDB_TO_MAL[tmdbId];
+    return null;
+  }
+  function isLikelyAnime(card) {
+    if (!card)
+      return false;
+    if (card.originalLanguage === "ja")
+      return true;
+    if (Array.isArray(card.genreIds) && card.genreIds.includes(16))
+      return true;
+    return false;
+  }
+  function fetchWithTimeout(url, timeoutMs) {
+    if (typeof fetch !== "function")
+      return Promise.reject(new Error("fetch unavailable"));
+    const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    const promise = fetch(url, ctrl ? { signal: ctrl.signal } : void 0);
+    if (!ctrl)
+      return promise;
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    return promise.finally(() => clearTimeout(timer));
+  }
+  function classifySkipType(skipType) {
+    if (!skipType)
+      return null;
+    const lowered = String(skipType).toLowerCase();
+    if (lowered.includes("op") || lowered === "opening")
+      return "intro";
+    if (lowered.includes("ed") || lowered === "ending")
+      return "credits";
+    if (lowered === "recap" || lowered === "mixed-op")
+      return "intro";
+    return null;
+  }
+  var AniSkipProvider = class extends ProviderBase {
+    constructor({ log, getSettings }) {
+      super({ name: "aniskip", log });
+      this.getSettings = getSettings || (() => ({}));
+    }
+    isApplicable(ctx) {
+      const settings = this.getSettings();
+      if (!settings || settings.useAniSkip === false)
+        return false;
+      const card = getCardSnapshot();
+      if (!card.tmdb)
+        return false;
+      if (!isLikelyAnime(card))
+        return false;
+      if (!resolveMalId(card.tmdb))
+        return false;
+      if (card.episode === null)
+        return false;
+      if (!ctx || !ctx.video)
+        return false;
+      return true;
+    }
+    async run(ctx, onUpdate) {
+      if (typeof fetch !== "function")
+        return;
+      const card = getCardSnapshot();
+      const malId = resolveMalId(card.tmdb);
+      if (!malId)
+        return;
+      const duration = Number.isFinite(ctx.video.duration) ? Math.round(ctx.video.duration) : 0;
+      if (duration <= 0)
+        return;
+      const url = `${API_BASE}/${malId}/${card.episode}?types[]=op&types[]=ed&episodeLength=${duration}`;
+      let response;
+      try {
+        response = await fetchWithTimeout(url, FETCH_TIMEOUT_MS);
+      } catch (e) {
+        this.log("warn", "aniskip fetch failed", e && e.message ? e.message : e);
+        return;
+      }
+      if (this.cancelled)
+        return;
+      if (!response || !response.ok) {
+        if (response)
+          this.log("warn", `aniskip API responded ${response.status}`);
+        return;
+      }
+      let body;
+      try {
+        body = await response.json();
+      } catch (e) {
+        this.log("warn", "aniskip response not JSON", e);
+        return;
+      }
+      if (!body || body.found === false)
+        return;
+      const results = Array.isArray(body.results) ? body.results : [];
+      if (!results.length)
+        return;
+      const ranges = { intro: [], credits: [] };
+      for (const item of results) {
+        const kind = classifySkipType(item && item.skipType);
+        const interval = item && item.interval;
+        if (!kind || !interval)
+          continue;
+        const start = Number(interval.startTime);
+        const end = Number(interval.endTime);
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start)
+          continue;
+        ranges[kind].push({ start, end });
+      }
+      if (!ranges.intro.length && !ranges.credits.length)
+        return;
+      if (this.cancelled)
+        return;
+      if (this.log) {
+        this.log("log", "aniskip API hit", {
+          malId,
+          episode: card.episode,
+          intro: ranges.intro,
+          credits: ranges.credits
+        });
+      }
+      onUpdate(ranges, { source: "aniskip", malId, episode: card.episode });
+    }
+  };
+
+  // src/playback/PlaybackController.js
+  var PlaybackController = class {
+    constructor({ resolver, getSettings, onSegmentEnter, onSegmentLeave, log }) {
+      this.resolver = resolver;
+      this.getSettings = getSettings;
+      this.onSegmentEnter = onSegmentEnter;
+      this.onSegmentLeave = onSegmentLeave;
+      this.log = log || (() => {
+      });
+      this.video = null;
+      this.timeHandler = null;
+      this.activeSegment = null;
+      this.activeRange = null;
+      this.skipped = { intro: false, credits: false };
+      this.dismissed = { intro: false, credits: false };
+    }
+    attach(video) {
+      if (this.video === video)
+        return;
+      this.detach();
+      this.video = video;
+      if (!video)
+        return;
+      this.timeHandler = () => this._tick();
+      video.addEventListener("timeupdate", this.timeHandler);
+    }
+    detach() {
+      if (this.video && this.timeHandler) {
+        try {
+          this.video.removeEventListener("timeupdate", this.timeHandler);
+        } catch (e) {
+        }
+      }
+      this.video = null;
+      this.timeHandler = null;
+      this.activeSegment = null;
+      this.activeRange = null;
+    }
+    resetSession() {
+      this.activeSegment = null;
+      this.activeRange = null;
+      this.skipped = { intro: false, credits: false };
+      this.dismissed = { intro: false, credits: false };
+    }
+    markSkipped(kind) {
+      if (kind in this.skipped)
+        this.skipped[kind] = true;
+    }
+    markDismissed(kind) {
+      if (kind in this.dismissed)
+        this.dismissed[kind] = true;
+    }
+    getActiveSegment() {
+      return this.activeSegment;
+    }
+    getActiveRange() {
+      return this.activeRange;
+    }
+    _tick() {
+      if (!this.video)
+        return;
+      const t2 = this.video.currentTime;
+      const d = this.video.duration;
+      if (!Number.isFinite(d) || d <= 0)
+        return;
+      const detected = this._detect(t2);
+      if (detected) {
+        const ranges = this.resolver.getRanges()[detected];
+        const firstRange = ranges && ranges.length ? ranges[0] : null;
+        const isSame = this.activeSegment === detected;
+        this.activeSegment = detected;
+        this.activeRange = firstRange ? Object.assign({}, firstRange) : null;
+        if (this.onSegmentEnter)
+          this.onSegmentEnter(detected, this.activeRange, isSame);
+      } else if (this.activeSegment) {
+        const prev = this.activeSegment;
+        this.activeSegment = null;
+        this.activeRange = null;
+        if (this.onSegmentLeave)
+          this.onSegmentLeave(prev);
+      }
+    }
+    _detect(time) {
+      const settings = this.getSettings();
+      const ranges = this.resolver.getRanges();
+      if (settings.skipIntro && !this.skipped.intro && !this.dismissed.intro) {
+        if (isTimeInRanges(time, ranges.intro || []))
+          return "intro";
+      }
+      if (settings.skipCredits && !this.skipped.credits && !this.dismissed.credits) {
+        if (isTimeInRanges(time, ranges.credits || []))
+          return "credits";
+      }
+      return null;
+    }
+  };
+
+  // src/playback/visibilityGuard.js
+  var VisibilityGuard = class {
+    constructor({ onResume, log }) {
+      this.onResume = onResume || (() => {
+      });
+      this.log = log || (() => {
+      });
+      this._onVisibility = null;
+      this._onPageShow = null;
+      this._wasHidden = false;
+      this._attached = false;
+    }
+    attach() {
+      if (this._attached)
+        return;
+      this._attached = true;
+      this._onVisibility = () => {
+        if (typeof document === "undefined")
+          return;
+        if (document.hidden) {
+          this._wasHidden = true;
+        } else if (this._wasHidden) {
+          this._wasHidden = false;
+          try {
+            this.onResume("visibilitychange");
+          } catch (e) {
+            this.log("warn", "visibility resume threw", e);
+          }
+        }
+      };
+      this._onPageShow = (event) => {
+        if (event && event.persisted) {
+          this._wasHidden = false;
+          try {
+            this.onResume("pageshow");
+          } catch (e) {
+            this.log("warn", "pageshow resume threw", e);
+          }
+        }
+      };
+      if (typeof document !== "undefined") {
+        document.addEventListener("visibilitychange", this._onVisibility);
+      }
+      if (typeof window !== "undefined") {
+        window.addEventListener("pageshow", this._onPageShow);
+      }
+    }
+    detach() {
+      if (!this._attached)
+        return;
+      if (typeof document !== "undefined" && this._onVisibility) {
+        try {
+          document.removeEventListener("visibilitychange", this._onVisibility);
+        } catch (e) {
+        }
+      }
+      if (typeof window !== "undefined" && this._onPageShow) {
+        try {
+          window.removeEventListener("pageshow", this._onPageShow);
+        } catch (e) {
+        }
+      }
+      this._onVisibility = null;
+      this._onPageShow = null;
+      this._wasHidden = false;
+      this._attached = false;
+    }
+  };
+
+  // src/playback/nativeSkipDetect.js
+  function getLampa8() {
+    return typeof Lampa !== "undefined" ? Lampa : null;
+  }
+  function getActivityCard3() {
+    const lampa = getLampa8();
+    try {
+      if (lampa && lampa.Activity && typeof lampa.Activity.active === "function") {
+        const activity = lampa.Activity.active();
+        if (activity && activity.card)
+          return activity.card;
+      }
+    } catch (e) {
+    }
+    return null;
+  }
+  function getPlayerData4() {
+    const lampa = getLampa8();
+    try {
+      if (lampa && lampa.Player && typeof lampa.Player.data === "function")
+        return lampa.Player.data();
+      if (lampa && lampa.Player && typeof lampa.Player.get === "function")
+        return lampa.Player.get();
+    } catch (e) {
+    }
+    return null;
+  }
+  function hasUsableTimestamps(value) {
+    if (Array.isArray(value))
+      return value.length > 0;
+    if (value && typeof value === "object")
+      return Object.keys(value).length > 0;
+    return false;
+  }
+  function hasNativeSkip() {
+    const card = getActivityCard3();
+    if (card && (hasUsableTimestamps(card.skip_timestamps) || hasUsableTimestamps(card.skip))) {
+      return true;
+    }
+    const data = getPlayerData4();
+    if (data && (hasUsableTimestamps(data.skip_timestamps) || hasUsableTimestamps(data.skip))) {
+      return true;
+    }
+    return false;
   }
 
-  // src/ui/skipButton/styles.js
-  var SKIP_BUTTON_STYLE_ID = "al-autoskip-style";
-  function ensureSkipButtonStyles() {
-    if (document.getElementById(SKIP_BUTTON_STYLE_ID))
+  // src/ui/SkipPrompt/styles.js
+  var SKIP_PROMPT_STYLE_ID = "al-autoskip-prompt-style";
+  function ensureSkipPromptStyles() {
+    if (typeof document === "undefined")
+      return;
+    if (document.getElementById(SKIP_PROMPT_STYLE_ID))
       return;
     const style = document.createElement("style");
-    style.id = SKIP_BUTTON_STYLE_ID;
+    style.id = SKIP_PROMPT_STYLE_ID;
     style.textContent = `
-    .al-autoskip-btn {
-      position: fixed;
-      right: 40px;
-      bottom: 120px;
-      width: 132px;
-      height: 132px;
-      border-radius: 50%;
+    .player-panel__skip-prompt {
+      position: absolute;
+      bottom: 100%;
+      right: 1.5em;
+      margin-bottom: 0.8em;
       display: none;
       align-items: center;
-      justify-content: center;
-      background: rgba(0, 0, 0, 0.65);
-      color: #fff;
-      font-size: 16px;
-      font-weight: 600;
-      text-align: center;
-      z-index: 9999;
-      border: 2px solid rgba(255, 255, 255, 0.2);
-      box-sizing: border-box;
-      cursor: pointer;
+      gap: 0.6em;
+      pointer-events: auto;
+      z-index: 5;
     }
-    .al-autoskip-btn.is-visible {
+    .player-panel__skip-prompt.is-visible {
       display: flex;
     }
-    .al-autoskip-btn::before {
-      content: "";
+    .autoskip-prompt__skip {
+      position: relative;
+      overflow: hidden;
+    }
+    .autoskip-prompt__progress {
       position: absolute;
-      inset: -8px;
-      border-radius: 50%;
-      background: conic-gradient(#4CAF50 0deg, rgba(76, 175, 80, 0.25) 0deg);
-      mask: radial-gradient(farthest-side, transparent calc(100% - 10px), #000 calc(100% - 9px));
-      opacity: 0;
+      left: 0;
+      bottom: 0;
+      width: 100%;
+      height: 0.3em;
+      background: #FF8A00;
+      transform: scaleX(0);
+      transform-origin: left center;
+      will-change: transform;
+      pointer-events: none;
+      border-radius: 0 0 1em 1em;
     }
-    .al-autoskip-btn.is-animating::before {
-      opacity: 1;
-      animation: al-autoskip-progress 5s linear forwards;
-    }
-    @keyframes al-autoskip-progress {
-      from {
-        background: conic-gradient(#4CAF50 0deg, rgba(76, 175, 80, 0.25) 0deg);
-      }
-      to {
-        background: conic-gradient(#4CAF50 360deg, rgba(76, 175, 80, 0.25) 360deg);
-      }
+    .autoskip-prompt--standalone {
+      position: fixed;
+      right: 2em;
+      bottom: 2em;
+      z-index: 9999;
+      margin-bottom: 0;
     }
   `;
     document.head.appendChild(style);
   }
 
-  // src/ui/skipButton/SkipButton.js
-  var SkipButton = class {
-    constructor({ text = "Пропустить", onClick }) {
-      this.text = text;
-      this.onClick = onClick;
-      this.el = null;
-      this._handleClick = () => {
-        if (this.onClick)
-          this.onClick();
+  // src/ui/SkipPrompt/progressTimer.js
+  var ProgressTimer = class {
+    constructor({ duration = 5e3, onTick, onDone }) {
+      this.duration = duration;
+      this.onTick = onTick || (() => {
+      });
+      this.onDone = onDone || (() => {
+      });
+      this._raf = null;
+      this._startedAt = 0;
+      this._elapsedBeforePause = 0;
+      this._running = false;
+      this._cancelled = false;
+      this._completed = false;
+    }
+    start() {
+      this._cancelled = false;
+      this._completed = false;
+      this._elapsedBeforePause = 0;
+      this._startedAt = this._now();
+      this._running = true;
+      this._loop();
+    }
+    pause() {
+      if (!this._running)
+        return;
+      this._elapsedBeforePause += this._now() - this._startedAt;
+      this._running = false;
+      if (this._raf) {
+        try {
+          cancelAnimationFrame(this._raf);
+        } catch (e) {
+        }
+        this._raf = null;
+      }
+    }
+    resume() {
+      if (this._running || this._cancelled || this._completed)
+        return;
+      this._startedAt = this._now();
+      this._running = true;
+      this._loop();
+    }
+    reset() {
+      this.cancel();
+      this._elapsedBeforePause = 0;
+      this._completed = false;
+    }
+    cancel() {
+      this._cancelled = true;
+      this._running = false;
+      if (this._raf) {
+        try {
+          cancelAnimationFrame(this._raf);
+        } catch (e) {
+        }
+        this._raf = null;
+      }
+    }
+    isRunning() {
+      return this._running;
+    }
+    isCompleted() {
+      return this._completed;
+    }
+    _now() {
+      if (typeof performance !== "undefined" && typeof performance.now === "function") {
+        return performance.now();
+      }
+      return Date.now();
+    }
+    _loop() {
+      const tick = () => {
+        if (this._cancelled || !this._running)
+          return;
+        const elapsed = this._elapsedBeforePause + (this._now() - this._startedAt);
+        const pct = Math.max(0, Math.min(1, elapsed / this.duration));
+        try {
+          this.onTick(pct);
+        } catch (e) {
+        }
+        if (pct >= 1) {
+          this._running = false;
+          this._completed = true;
+          try {
+            this.onDone();
+          } catch (e) {
+          }
+          return;
+        }
+        this._raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame(tick) : setTimeout(tick, 16);
       };
+      tick();
     }
-    ensure() {
-      if (this.el)
-        return this.el;
-      ensureSkipButtonStyles();
-      const button = document.createElement("div");
-      button.className = "al-autoskip-btn";
-      button.textContent = this.text;
-      button.addEventListener("click", this._handleClick);
-      document.body.appendChild(button);
-      this.el = button;
-      return button;
+  };
+
+  // src/ui/SkipPrompt/controller.js
+  var CONTROLLER_NAME = "autoskip_prompt";
+  function getLampa9() {
+    return typeof Lampa !== "undefined" ? Lampa : null;
+  }
+  function getNavigator() {
+    if (typeof window === "undefined")
+      return null;
+    return window.Navigator || null;
+  }
+  function fallbackMove(direction, root) {
+    if (!root || !direction)
+      return;
+    const list = Array.from(root.querySelectorAll(".selector"));
+    if (!list.length)
+      return;
+    const current = list.findIndex((el) => el.classList.contains("focus"));
+    if (current === -1) {
+      list[0].classList.add("focus");
+      return;
     }
-    isVisible() {
-      return !!this.el && this.el.classList.contains("is-visible");
+    let next = current;
+    if (direction === "left")
+      next = Math.max(0, current - 1);
+    else if (direction === "right")
+      next = Math.min(list.length - 1, current + 1);
+    if (next === current)
+      return;
+    list[current].classList.remove("focus");
+    list[next].classList.add("focus");
+  }
+  function focusElement(el, root) {
+    if (!el)
+      return;
+    const lampa = getLampa9();
+    if (lampa && lampa.Controller && typeof lampa.Controller.collectionFocus === "function") {
+      try {
+        lampa.Controller.collectionFocus(el, root);
+        return;
+      } catch (e) {
+      }
     }
-    show() {
-      const el = this.ensure();
-      el.style.display = "";
-      el.classList.add("is-visible");
+    Array.from(root.querySelectorAll(".selector")).forEach((node) => node.classList.remove("focus"));
+    el.classList.add("focus");
+  }
+  function setCollection(html) {
+    const lampa = getLampa9();
+    if (!lampa || !lampa.Controller)
+      return false;
+    if (typeof lampa.Controller.collectionSet !== "function")
+      return false;
+    try {
+      lampa.Controller.collectionSet(html);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  function moveDirection(direction, root) {
+    const navigator = getNavigator();
+    if (navigator && typeof navigator.move === "function") {
+      try {
+        navigator.move(direction);
+        return;
+      } catch (e) {
+      }
+    }
+    const lampa = getLampa9();
+    if (lampa && lampa.Controller && typeof lampa.Controller.move === "function") {
+      try {
+        lampa.Controller.move(direction);
+        return;
+      } catch (e) {
+      }
+    }
+    fallbackMove(direction, root);
+  }
+  var PromptController = class {
+    constructor({ root, log, onSkip, onCancel, onLeft, onRight }) {
+      this.root = root;
+      this.log = log || (() => {
+      });
+      this.onSkip = onSkip || (() => {
+      });
+      this.onCancel = onCancel || (() => {
+      });
+      this.onLeft = onLeft || null;
+      this.onRight = onRight || null;
+      this.previousController = "";
+      this._registered = false;
+      this._active = false;
+    }
+    takeover(initialFocusEl) {
+      const lampa = getLampa9();
+      if (!lampa || !lampa.Controller || typeof lampa.Controller.add !== "function") {
+        focusElement(initialFocusEl, this.root);
+        return;
+      }
+      try {
+        const enabled = typeof lampa.Controller.enabled === "function" ? lampa.Controller.enabled() : null;
+        this.previousController = enabled && enabled.name || "";
+      } catch (e) {
+        this.previousController = "";
+      }
+      if (!this._registered) {
+        lampa.Controller.add(CONTROLLER_NAME, {
+          toggle: () => {
+            if (!setCollection(this.root)) {
+            }
+            focusElement(initialFocusEl, this.root);
+          },
+          left: () => {
+            if (this.onLeft)
+              this.onLeft();
+            else
+              moveDirection("left", this.root);
+          },
+          right: () => {
+            if (this.onRight)
+              this.onRight();
+            else
+              moveDirection("right", this.root);
+          },
+          up: () => moveDirection("up", this.root),
+          down: () => moveDirection("down", this.root),
+          enter: () => {
+            const focused = this.root.querySelector(".selector.focus");
+            const isCancel = focused && focused.classList.contains("autoskip-prompt__cancel");
+            if (isCancel) {
+              try {
+                this.onCancel();
+              } finally {
+                this.release();
+              }
+            } else {
+              try {
+                this.onSkip();
+              } finally {
+                this.release();
+              }
+            }
+          },
+          back: () => {
+            try {
+              this.onCancel();
+            } finally {
+              this.release();
+            }
+          },
+          gone: () => {
+            this._active = false;
+          }
+        });
+        this._registered = true;
+      }
+      try {
+        lampa.Controller.toggle(CONTROLLER_NAME);
+        this._active = true;
+      } catch (e) {
+        focusElement(initialFocusEl, this.root);
+      }
+    }
+    release() {
+      if (!this._active) {
+        return;
+      }
+      this._active = false;
+      const lampa = getLampa9();
+      if (!lampa || !lampa.Controller || typeof lampa.Controller.toggle !== "function")
+        return;
+      try {
+        const target = this.previousController || "player";
+        lampa.Controller.toggle(target);
+      } catch (e) {
+      }
+    }
+    isActive() {
+      return this._active;
+    }
+  };
+
+  // src/ui/SkipPrompt/SkipPrompt.js
+  var PANEL_SELECTORS = [".player .player-panel__body", ".player .player-panel", ".player-panel__body", ".player-panel"];
+  function findMountTarget() {
+    if (typeof document === "undefined")
+      return null;
+    for (const selector of PANEL_SELECTORS) {
+      const el = document.querySelector(selector);
+      if (el)
+        return el;
+    }
+    return null;
+  }
+  function buildElement() {
+    const root = document.createElement("div");
+    root.className = "player-panel__skip-prompt autoskip-prompt";
+    const cancel = document.createElement("div");
+    cancel.className = "simple-button selector autoskip-prompt__cancel";
+    const cancelLabel = document.createElement("span");
+    cancelLabel.textContent = t("autoskip_cancel");
+    cancel.appendChild(cancelLabel);
+    const skip = document.createElement("div");
+    skip.className = "simple-button selector autoskip-prompt__skip";
+    const skipLabel = document.createElement("span");
+    skipLabel.textContent = t("autoskip_skip");
+    skip.appendChild(skipLabel);
+    const progress = document.createElement("div");
+    progress.className = "autoskip-prompt__progress";
+    skip.appendChild(progress);
+    root.appendChild(cancel);
+    root.appendChild(skip);
+    return { root, cancel, skip, progress };
+  }
+  var SkipPrompt = class {
+    constructor({ log, durationMs = 5e3, onSkip, onCancel } = {}) {
+      this.log = log || (() => {
+      });
+      this.durationMs = durationMs;
+      this.onSkip = onSkip || (() => {
+      });
+      this.onCancel = onCancel || (() => {
+      });
+      this.parts = null;
+      this.controller = null;
+      this.timer = null;
+      this._mountedAs = null;
+      this._video = null;
+      this._videoEvents = null;
+      this._visible = false;
+    }
+    attachToVideo(video) {
+      this._detachVideo();
+      this._video = video;
+      if (!video)
+        return;
+      const onPause = () => {
+        if (this.timer)
+          this.timer.pause();
+      };
+      const onPlaying = () => {
+        if (this.timer && this._visible)
+          this.timer.resume();
+      };
+      const onSeeking = () => {
+        if (this.timer)
+          this.timer.reset();
+      };
+      video.addEventListener("pause", onPause);
+      video.addEventListener("playing", onPlaying);
+      video.addEventListener("seeking", onSeeking);
+      this._videoEvents = { onPause, onPlaying, onSeeking };
+    }
+    _detachVideo() {
+      if (this._video && this._videoEvents) {
+        try {
+          this._video.removeEventListener("pause", this._videoEvents.onPause);
+        } catch (e) {
+        }
+        try {
+          this._video.removeEventListener("playing", this._videoEvents.onPlaying);
+        } catch (e) {
+        }
+        try {
+          this._video.removeEventListener("seeking", this._videoEvents.onSeeking);
+        } catch (e) {
+        }
+      }
+      this._video = null;
+      this._videoEvents = null;
+    }
+    _ensure() {
+      ensureSkipPromptStyles();
+      if (this.parts && document.body.contains(this.parts.root))
+        return this.parts;
+      if (this.parts) {
+        try {
+          this.parts.root.remove();
+        } catch (e) {
+        }
+      }
+      this.parts = buildElement();
+      const target = findMountTarget();
+      if (target) {
+        target.appendChild(this.parts.root);
+        this._mountedAs = "panel";
+      } else {
+        this.parts.root.classList.add("autoskip-prompt--standalone");
+        document.body.appendChild(this.parts.root);
+        this._mountedAs = "standalone";
+      }
+      this.parts.cancel.addEventListener("click", () => this._handleCancel());
+      this.parts.skip.addEventListener("click", () => this._handleSkip());
+      return this.parts;
+    }
+    show(segment) {
+      const parts = this._ensure();
+      this._activeSegment = segment;
+      parts.root.classList.add("is-visible");
+      parts.cancel.classList.remove("focus");
+      parts.skip.classList.add("focus");
+      parts.progress.style.transform = "scaleX(0)";
+      if (!this.controller) {
+        this.controller = new PromptController({
+          root: parts.root,
+          log: this.log,
+          onSkip: () => this._handleSkip(),
+          onCancel: () => this._handleCancel()
+        });
+      }
+      if (!this._visible) {
+        this.controller.takeover(parts.skip);
+      }
+      this._visible = true;
+      this._restartTimer();
+    }
+    _restartTimer() {
+      if (this.timer)
+        this.timer.cancel();
+      if (!this.parts)
+        return;
+      const { progress } = this.parts;
+      this.timer = new ProgressTimer({
+        duration: this.durationMs,
+        onTick: (pct) => {
+          progress.style.transform = `scaleX(${pct})`;
+        },
+        onDone: () => this._handleSkip(true)
+      });
+      this.timer.start();
     }
     hide() {
-      if (!this.el)
-        return;
-      this.el.classList.remove("is-visible", "is-animating");
-    }
-    restartAnimation() {
-      if (!this.el)
-        return;
-      this.el.classList.remove("is-animating");
-      void this.el.offsetWidth;
-      this.el.classList.add("is-animating");
+      if (this.timer) {
+        this.timer.cancel();
+        this.timer = null;
+      }
+      if (this.parts) {
+        this.parts.root.classList.remove("is-visible");
+        this.parts.skip.classList.remove("focus");
+        this.parts.cancel.classList.remove("focus");
+        this.parts.progress.style.transform = "scaleX(0)";
+      }
+      if (this.controller && this._visible) {
+        this.controller.release();
+      }
+      this._visible = false;
+      this._activeSegment = null;
     }
     destroy() {
-      if (!this.el)
-        return;
-      this.el.removeEventListener("click", this._handleClick);
-      this.el.remove();
-      this.el = null;
+      this.hide();
+      this._detachVideo();
+      if (this.parts) {
+        try {
+          this.parts.root.remove();
+        } catch (e) {
+        }
+        this.parts = null;
+      }
+      this.controller = null;
+    }
+    isVisible() {
+      return this._visible;
+    }
+    _handleSkip() {
+      const segment = this._activeSegment;
+      this.hide();
+      try {
+        this.onSkip(segment);
+      } catch (e) {
+        this.log("warn", "onSkip threw", e);
+      }
+    }
+    _handleCancel() {
+      const segment = this._activeSegment;
+      this.hide();
+      try {
+        this.onCancel(segment);
+      } catch (e) {
+        this.log("warn", "onCancel threw", e);
+      }
     }
   };
 
   // src/core/AutoSkipPlugin.js
-  var SOURCE_PRIORITY = {
-    cache: 0,
-    audio: 1,
-    textTracks: 2,
-    playerData: 3
-  };
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "1.0.6";
+      this.version = "2.0.0";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";
       this.log = createLogger({ tag: this.logTag });
-      this.settings = Object.assign({
-        enabled: true,
-        autoStart: true,
-        skipIntro: true,
-        skipCredits: true,
-        showNotifications: true,
-        debug: false
-      }, loadSettings());
-      this.segmentCache = loadSegmentCache();
+      this.capabilities = probe();
+      this.settingsStore = new SettingsStore({ log: this.log });
+      this.settings = Object.assign({}, SETTINGS_DEFAULTS, this.settingsStore.load());
+      this.settingsStore.update(this.settings);
+      this.segmentCache = new SegmentCache({ log: this.log });
+      this.segmentCache.load();
+      this.resolver = new SegmentResolver();
+      this.playback = new PlaybackController({
+        resolver: this.resolver,
+        getSettings: () => this.settings,
+        onSegmentEnter: (segment, range, isSame) => this._handleSegmentEnter(segment, range, isSame),
+        onSegmentLeave: () => this._handleSegmentLeave(),
+        log: this.log
+      });
+      this.metadataProvider = new MetadataProvider({ log: this.log });
+      this.chaptersProvider = new ChaptersProvider({ log: this.log });
+      this.audioProvider = new AudioProvider({
+        log: this.log,
+        onUpdate: (ranges, meta) => this._onProviderUpdate("audio", ranges, meta)
+      });
+      this.aniSkipProvider = new AniSkipProvider({
+        log: this.log,
+        getSettings: () => this.settings
+      });
+      this.visibilityGuard = new VisibilityGuard({
+        log: this.log,
+        onResume: () => {
+          if (this.audioProvider)
+            this.audioProvider.resetSession();
+          if (this.settings.debug)
+            this.log("log", "audio buffer reset on visibility resume");
+        }
+      });
+      this.skipPrompt = new SkipPrompt({
+        log: this.log,
+        durationMs: 5e3,
+        onSkip: (segment) => {
+          const target = segment || this.playback.getActiveSegment();
+          if (!target)
+            return;
+          this.performSkip(target);
+        },
+        onCancel: (segment) => {
+          const target = segment || this.playback.getActiveSegment();
+          if (target)
+            this.playback.markDismissed(target);
+        }
+      });
       this.isRunning = false;
       this.video = null;
-      this.timeHandler = null;
-      this.introSkipped = false;
-      this.creditsSkipped = false;
-      this.activeSegment = null;
-      this.activeSegmentRange = null;
-      this.segmentRanges = { intro: [], credits: [] };
-      this.segmentSources = { intro: null, credits: null };
       this._bindedOnLoadedMeta = null;
       this._bindedOnPlaying = null;
       this._settingsRegistered = false;
       this._cacheSaveTimer = null;
       this._cachePendingKey = null;
       this._cachePendingRanges = null;
-      this.rmsConfig = {
-        windowSec: 0.5,
-        baselineWindows: 120,
-        zThreshold: 1.4,
-        minSegmentSec: 8,
-        mergeGapSec: 1
-      };
-      this.audioDetector = new AudioSegmentDetector({
-        config: this.rmsConfig,
-        log: this.log,
-        onUpdate: (ranges, meta) => this.onRangesDetected("audio", ranges, meta)
-      });
-      this.skipButton = new SkipButton({
-        onClick: () => {
-          if (!this.activeSegment)
-            return;
-          this.performSkip(this.activeSegment);
-        }
-      });
       this.init();
     }
     init() {
       waitForLampa({
         predicate: () => typeof Lampa !== "undefined" && Lampa.Player && Lampa.Player.listener,
         onReady: () => {
+          registerTranslations();
           this.addSettingsToLampa();
           this.listenPlayer();
           if (this.settings.autoStart && this.settings.enabled)
             this.start();
+          if (this.settings.debug)
+            this.log("log", "capabilities", this.capabilities);
           this.log("log", `initialized (${this.version}).`);
         },
         onTimeout: () => {
@@ -833,7 +2441,7 @@
       });
     }
     addSettingsToLampa() {
-      const icon = '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+      const icon = '<svg width="24" height="24" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg>';
       const maxAttempts = 30;
       const retryDelayMs = 500;
       const tryRegister = (attempt) => {
@@ -873,38 +2481,50 @@
         settings: this.settings,
         onChange: (key, value) => {
           this.settings[key] = value;
-          saveSettings(this.settings);
+          this.settingsStore.set(key, value);
         },
         log: this.log
       });
     }
     listenPlayer() {
-      if (typeof Lampa !== "undefined" && Lampa.Player && Lampa.Player.listener) {
-        Lampa.Player.listener.follow("start", () => this.onPlayerStart());
-        Lampa.Player.listener.follow("stop", () => this.onPlayerStop());
-      }
+      followPlayer({
+        start: () => this.onPlayerStart(),
+        stop: () => this.onPlayerStop()
+      });
+    }
+    start() {
+      this.isRunning = true;
+      this.log("log", "auto-skip started.");
+    }
+    stop() {
+      this.isRunning = false;
+      this.log("log", "auto-skip stopped.");
     }
     onPlayerStart() {
       if (!this.settings.enabled)
         return;
-      this.resetSession();
-      this.hideSkipButton();
+      if (hasNativeSkip()) {
+        if (this.settings.debug)
+          this.log("log", "native skip metadata detected; plugin yields.");
+        return;
+      }
+      this.resolver.reset();
+      this.playback.resetSession();
+      this.visibilityGuard.attach();
+      this._hideSkipButton();
       const attach = () => {
-        const video = this.getVideo();
+        const video = this._getVideo();
         if (!video)
           return false;
         this.video = video;
-        const onReady = () => this.onVideoReady();
+        const onReady = () => this._onVideoReady();
         if (!Number.isFinite(video.duration)) {
           this._bindedOnLoadedMeta = onReady;
           video.addEventListener("loadedmetadata", this._bindedOnLoadedMeta, { once: true });
         } else {
           onReady();
         }
-        this._bindedOnPlaying = () => {
-          if (!this.timeHandler)
-            this.attachTimeHandler();
-        };
+        this._bindedOnPlaying = () => this.playback.attach(this.video);
         video.addEventListener("playing", this._bindedOnPlaying);
         return true;
       };
@@ -919,110 +2539,84 @@
       };
       poll();
     }
-    onVideoReady() {
-      this.applyCachedSegments();
-      this.onRangesDetected("playerData", getRangesFromPlayerData(), { passive: true });
-      this.onRangesDetected("textTracks", getRangesFromTextTracks(this.video), { passive: true });
-      this.attachTimeHandler();
-      this.audioDetector.start(this.video);
-    }
-    attachTimeHandler() {
-      if (!this.video)
-        return;
-      if (this.timeHandler)
-        return;
-      this.timeHandler = () => this.checkSkip();
-      this.video.addEventListener("timeupdate", this.timeHandler);
+    _onVideoReady() {
+      this._applyCachedSegments();
+      this._runProvider(this.metadataProvider);
+      this._runProvider(this.chaptersProvider);
+      this._runProvider(this.aniSkipProvider);
+      this.playback.attach(this.video);
+      this.skipPrompt.attachToVideo(this.video);
+      this._runProvider(this.audioProvider);
     }
     onPlayerStop() {
-      if (this.video && this.timeHandler) {
-        this.video.removeEventListener("timeupdate", this.timeHandler);
-      }
       if (this.video && this._bindedOnLoadedMeta) {
-        this.video.removeEventListener("loadedmetadata", this._bindedOnLoadedMeta);
+        try {
+          this.video.removeEventListener("loadedmetadata", this._bindedOnLoadedMeta);
+        } catch (e) {
+        }
       }
       if (this.video && this._bindedOnPlaying) {
-        this.video.removeEventListener("playing", this._bindedOnPlaying);
+        try {
+          this.video.removeEventListener("playing", this._bindedOnPlaying);
+        } catch (e) {
+        }
       }
-      this.audioDetector.stop();
-      this.flushPendingCacheSave();
+      this.playback.detach();
+      this.audioProvider.cancel();
+      this.audioProvider.reset();
+      this.visibilityGuard.detach();
+      this._flushPendingCacheSave();
       this.video = null;
-      this.timeHandler = null;
       this._bindedOnLoadedMeta = null;
       this._bindedOnPlaying = null;
-      this.activeSegment = null;
-      this.activeSegmentRange = null;
-      this.segmentRanges = { intro: [], credits: [] };
-      this.segmentSources = { intro: null, credits: null };
-      this.hideSkipButton(true);
+      this.resolver.reset();
+      this.playback.resetSession();
+      this._hideSkipButton(true);
     }
-    resetSession() {
-      this.introSkipped = false;
-      this.creditsSkipped = false;
-      this.activeSegment = null;
-      this.activeSegmentRange = null;
-      this.segmentRanges = { intro: [], credits: [] };
-      this.segmentSources = { intro: null, credits: null };
+    _runProvider(provider) {
+      if (!provider)
+        return;
+      try {
+        if (!provider.isApplicable({ video: this.video, capabilities: this.capabilities }))
+          return;
+        const result = provider.run(
+          { video: this.video, capabilities: this.capabilities },
+          (ranges, meta) => this._onProviderUpdate(provider.name, ranges, meta)
+        );
+        if (result && typeof result.catch === "function") {
+          result.catch((err) => this.log("warn", `${provider.name} provider failed`, err));
+        }
+      } catch (err) {
+        this.log("warn", `${provider.name} provider threw`, err);
+      }
     }
-    start() {
-      this.isRunning = true;
-      this.log("log", "auto-skip started.");
-    }
-    stop() {
-      this.isRunning = false;
-      this.log("log", "auto-skip stopped.");
-    }
-    checkSkip() {
+    _onProviderUpdate(source, rawRanges, meta) {
       if (!this.video)
         return;
-      const t = this.video.currentTime;
-      const d = this.video.duration;
-      if (!Number.isFinite(d) || d <= 0)
+      const normalized = normalizeRanges(rawRanges, this.video.duration);
+      const updated = this.resolver.apply(source, normalized);
+      if (!updated)
         return;
-      const segment = this.detectSegment(t);
-      if (segment) {
-        this.showSkipButton(segment);
-      } else if (this.activeSegment) {
-        this.hideSkipButton();
+      if (this.settings.debug)
+        this._logSegmentRanges(source, this.resolver.getRanges(), meta);
+      if (source !== "cache")
+        this._scheduleCacheSave(this.resolver.getRanges());
+    }
+    _handleSegmentEnter(segment, range, isSame) {
+      if (!isSame || !this.skipPrompt.isVisible()) {
+        this.skipPrompt.show(segment);
+        const t2 = this.video && Number.isFinite(this.video.currentTime) ? this.video.currentTime.toFixed(2) : "n/a";
+        if (this.settings.debug) {
+          this.log("log", `segment detected -> ${segment} at ${t2}s`, {
+            range,
+            duration: this.video ? this.video.duration : void 0,
+            sources: this.resolver.getSources()
+          });
+        }
       }
     }
-    detectSegment(time) {
-      return this.detectSegmentFromRanges(time);
-    }
-    detectSegmentFromRanges(time) {
-      if (this.settings.skipIntro && !this.introSkipped) {
-        if (isTimeInRanges(time, this.segmentRanges.intro))
-          return "intro";
-      }
-      if (this.settings.skipCredits && !this.creditsSkipped) {
-        if (isTimeInRanges(time, this.segmentRanges.credits))
-          return "credits";
-      }
-      return null;
-    }
-    showSkipButton(segment) {
-      var _a;
-      const isSame = this.activeSegment === segment;
-      const wasVisible = this.skipButton.isVisible();
-      this.activeSegment = segment;
-      this.skipButton.show();
-      if (!isSame || !wasVisible) {
-        this.activeSegmentRange = ((_a = this.segmentRanges[segment]) == null ? void 0 : _a.length) ? Object.assign({}, this.segmentRanges[segment][0]) : null;
-        const t = this.video && Number.isFinite(this.video.currentTime) ? this.video.currentTime.toFixed(2) : "n/a";
-        this.log("log", `segment detected -> ${segment} at ${t}s`, {
-          ranges: this.segmentRanges[segment] || [],
-          duration: this.video ? this.video.duration : void 0,
-          sources: this.segmentSources
-        });
-        this.skipButton.restartAnimation();
-      }
-    }
-    hideSkipButton(destroy = false) {
-      this.skipButton.hide();
-      if (destroy)
-        this.skipButton.destroy();
-      this.activeSegment = null;
-      this.activeSegmentRange = null;
+    _handleSegmentLeave() {
+      this._hideSkipButton();
     }
     performSkip(segment) {
       if (!this.video)
@@ -1030,25 +2624,26 @@
       const duration = this.video.duration;
       if (!Number.isFinite(duration) || duration <= 0)
         return;
+      const ranges = this.resolver.getRanges();
       if (segment === "intro") {
-        const intro = this.activeSegmentRange && this.activeSegment === "intro" ? this.activeSegmentRange : this.segmentRanges.intro.length ? this.segmentRanges.intro[0] : null;
-        if (!intro)
+        const range = this.playback.getActiveRange() && this.playback.getActiveSegment() === "intro" ? this.playback.getActiveRange() : ranges.intro && ranges.intro.length ? ranges.intro[0] : null;
+        if (!range)
           return;
-        this.introSkipped = true;
-        this.safeSeek(intro.end);
-        this.notify("Пропущено вступление");
+        this.playback.markSkipped("intro");
+        this._safeSeek(range.end);
+        this._notify(t("autoskip_intro_skipped"));
       }
       if (segment === "credits") {
-        const credits = this.activeSegmentRange && this.activeSegment === "credits" ? this.activeSegmentRange : this.segmentRanges.credits.length ? this.segmentRanges.credits[0] : null;
-        if (!credits)
+        const range = this.playback.getActiveRange() && this.playback.getActiveSegment() === "credits" ? this.playback.getActiveRange() : ranges.credits && ranges.credits.length ? ranges.credits[0] : null;
+        if (!range)
           return;
-        this.creditsSkipped = true;
-        this.safeSeek(Math.min(duration - 1, Math.max(0, credits.end)));
-        this.notify("Пропущены титры");
+        this.playback.markSkipped("credits");
+        this._safeSeek(Math.min(duration - 1, Math.max(0, range.end)));
+        this._notify(t("autoskip_credits_skipped"));
       }
-      this.hideSkipButton();
+      this._hideSkipButton();
     }
-    safeSeek(target) {
+    _safeSeek(target) {
       try {
         if (Number.isFinite(target))
           this.video.currentTime = target;
@@ -1056,7 +2651,7 @@
         this.log("warn", "Failed to seek:", e);
       }
     }
-    notify(msg) {
+    _notify(msg) {
       if (!this.settings.showNotifications)
         return;
       if (typeof Lampa !== "undefined" && Lampa.Noty)
@@ -1064,70 +2659,52 @@
       else
         this.log("log", msg);
     }
-    applyCachedSegments() {
-      const key = getCacheKey(this.video);
-      if (!key)
+    _hideSkipButton(destroy = false) {
+      this.skipPrompt.hide();
+      if (destroy)
+        this.skipPrompt.destroy();
+    }
+    _applyCachedSegments() {
+      const ids = getContentId(this.video);
+      if (!ids || !ids.primary)
         return;
-      const cached = readCachedRanges(this.segmentCache, key);
+      let cached = this.segmentCache.read(ids.primary);
+      let key = ids.primary;
+      if (!cached && ids.legacy) {
+        cached = this.segmentCache.read(ids.legacy);
+        if (cached) {
+          this.segmentCache.write(ids.primary, cached);
+          this.segmentCache.scheduleSave();
+        }
+      }
       if (!cached)
         return;
       const normalized = normalizeRanges(cached, this.video.duration);
       if (!normalized.intro.length && !normalized.credits.length)
         return;
-      const updated = this.applyRangesWithPriority("cache", normalized);
-      if (updated) {
-        this.logSegmentRanges("cache", this.segmentRanges, { key });
+      const updated = this.resolver.apply("cache", normalized);
+      if (updated && this.settings.debug) {
+        this._logSegmentRanges("cache", this.resolver.getRanges(), { key });
       }
     }
-    onRangesDetected(source, ranges, meta = null) {
-      if (!this.video)
+    _scheduleCacheSave(ranges) {
+      const ids = getContentId(this.video);
+      if (!ids || !ids.primary)
         return;
-      const normalized = normalizeRanges(ranges, this.video.duration);
-      const updated = this.applyRangesWithPriority(source, normalized);
-      if (!updated)
+      if (!ranges)
         return;
-      this.logSegmentRanges(source, this.segmentRanges, meta);
-      if (source !== "cache") {
-        this.saveSegmentsToCache(this.segmentRanges);
-      }
-    }
-    applyRangesWithPriority(source, normalizedRanges) {
-      const introUpdated = this.applyKindWithPriority(source, "intro", normalizedRanges.intro);
-      const creditsUpdated = this.applyKindWithPriority(source, "credits", normalizedRanges.credits);
-      return introUpdated || creditsUpdated;
-    }
-    applyKindWithPriority(source, kind, incomingRanges) {
-      var _a, _b;
-      if (!incomingRanges.length)
-        return false;
-      const incomingPriority = (_a = SOURCE_PRIORITY[source]) != null ? _a : 0;
-      const currentSource = this.segmentSources[kind];
-      const currentPriority = currentSource ? (_b = SOURCE_PRIORITY[currentSource]) != null ? _b : 0 : -1;
-      const shouldReplace = !this.segmentRanges[kind].length || incomingPriority >= currentPriority;
-      if (!shouldReplace)
-        return false;
-      if (rangesEqual(this.segmentRanges[kind], incomingRanges))
-        return false;
-      this.segmentRanges[kind] = incomingRanges;
-      this.segmentSources[kind] = source;
-      return true;
-    }
-    saveSegmentsToCache(ranges) {
-      const key = getCacheKey(this.video);
-      if (!key)
+      if ((!ranges.intro || !ranges.intro.length) && (!ranges.credits || !ranges.credits.length))
         return;
-      if (!ranges || (!ranges.intro || !ranges.intro.length) && (!ranges.credits || !ranges.credits.length))
-        return;
-      this._cachePendingKey = key;
+      this._cachePendingKey = ids.primary;
       this._cachePendingRanges = {
         intro: (ranges.intro || []).slice(),
         credits: (ranges.credits || []).slice()
       };
       if (this._cacheSaveTimer)
         return;
-      this._cacheSaveTimer = setTimeout(() => this.flushPendingCacheSave(), 1500);
+      this._cacheSaveTimer = setTimeout(() => this._flushPendingCacheSave(), 1500);
     }
-    flushPendingCacheSave() {
+    _flushPendingCacheSave() {
       if (!this._cacheSaveTimer && !this._cachePendingKey)
         return;
       if (this._cacheSaveTimer) {
@@ -1140,33 +2717,50 @@
       this._cachePendingRanges = null;
       if (!key || !ranges)
         return;
-      writeCachedRanges(this.segmentCache, key, ranges);
       try {
-        saveSegmentCache(this.segmentCache);
-        if (this.settings.debug) {
+        this.segmentCache.write(key, ranges);
+        this.segmentCache.save();
+        if (this.settings.debug)
           this.log("log", "segments cached", { key, intro: ranges.intro, credits: ranges.credits });
-        }
       } catch (e) {
         this.log("warn", "Failed to save cache:", e);
       }
     }
-    logSegmentRanges(source, ranges, meta = null) {
-      if (!this.settings.debug)
-        return;
+    _logSegmentRanges(source, ranges, meta = null) {
       const format = (seg) => seg.map((r) => `${r.start.toFixed(1)}-${r.end.toFixed(1)}s`).join(", ") || "none";
       const intro = ranges.intro || [];
       const credits = ranges.credits || [];
       this.log("log", `segments from ${source}: intro=${format(intro)}; credits=${format(credits)}`, meta);
     }
-    getVideo() {
+    _getVideo() {
       return document.querySelector("video");
     }
   };
 
   // src/entry.js
   var PLUGIN_ID = "autoskip";
+  function isDisabledByUrl() {
+    try {
+      return /[?&]autoskip=off\b/i.test(window.location.search || "");
+    } catch (e) {
+      return false;
+    }
+  }
+  function isDisabledByStorage() {
+    try {
+      if (typeof Lampa !== "undefined" && Lampa.Storage && typeof Lampa.Storage.field === "function") {
+        return Lampa.Storage.field("autoskip_disabled") === true;
+      }
+    } catch (e) {
+    }
+    return false;
+  }
   if (!window[PLUGIN_ID]) {
     window[PLUGIN_ID] = true;
-    new AutoSkipPlugin();
+    if (isDisabledByUrl() || isDisabledByStorage()) {
+      console.warn("[AutoSkip] disabled by user (URL flag or stored preference).");
+    } else {
+      new AutoSkipPlugin();
+    }
   }
 })();

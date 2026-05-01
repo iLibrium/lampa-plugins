@@ -1,3 +1,5 @@
+import { t as translate } from '../util/i18n.js';
+
 function getLampaSettings() {
   if (typeof Lampa === 'undefined' || !Lampa.Settings) return null;
   return Lampa.Settings;
@@ -20,12 +22,7 @@ export function registerSettingsComponent({ component, name, icon, onSelect, log
     return false;
   }
 
-  const config = {
-    component,
-    name,
-    icon,
-    onSelect
-  };
+  const config = { component, name, icon, onSelect };
 
   const registerMethods = ['addComponent', 'register', 'registerComponent', 'add', 'addItem', 'component'];
   let registered = false;
@@ -59,27 +56,69 @@ export function registerSettingsComponent({ component, name, icon, onSelect, log
   }
 
   if (settings.listener && typeof settings.listener.follow === 'function') {
-    settings.listener.follow('open', (e) => {
-      if (e.name === component) onSelect();
-    });
+    try {
+      settings.listener.follow('open', (e) => {
+        if (e && e.name === component) onSelect();
+      });
+    } catch (e) { /* noop */ }
   }
 
   return true;
 }
 
-export function showSettingsModal({ name, version, settings, onChange, log }) {
-  const html = `
-    <div id="al-autoskip-settings" style="padding:20px;max-width:400px;color:#fff">
-      <h2 style="color:#4CAF50">${name}</h2>
-      <label><input type="checkbox" data-setting="enabled" ${settings.enabled ? 'checked' : ''}/> Включить AutoSkip</label><br>
-      <label><input type="checkbox" data-setting="autoStart" ${settings.autoStart ? 'checked' : ''}/> Автозапуск</label><br>
-      <label><input type="checkbox" data-setting="skipIntro" ${settings.skipIntro ? 'checked' : ''}/> Пропускать вступление</label><br>
-      <label><input type="checkbox" data-setting="skipCredits" ${settings.skipCredits ? 'checked' : ''}/> Пропускать титры</label><br>
-      <label><input type="checkbox" data-setting="showNotifications" ${settings.showNotifications ? 'checked' : ''}/> Показывать уведомления</label><br>
-      <label><input type="checkbox" data-setting="debug" ${settings.debug ? 'checked' : ''}/> Debug-логи</label><br>
-      <div style="margin-top:10px;font-size:13px;color:#aaa">Версия: ${version}</div>
+function persistGlobalDisable(value) {
+  try {
+    if (typeof Lampa !== 'undefined' && Lampa.Storage && typeof Lampa.Storage.set === 'function') {
+      Lampa.Storage.set('autoskip_disabled', !!value);
+    }
+  } catch (e) { /* noop */ }
+}
+
+const SETTING_DEFINITIONS = [
+  { key: 'enabled', label: 'autoskip_setting_enabled' },
+  { key: 'autoStart', label: 'autoskip_setting_autostart' },
+  { key: 'skipIntro', label: 'autoskip_setting_skip_intro' },
+  { key: 'skipCredits', label: 'autoskip_setting_skip_credits' },
+  { key: 'showNotifications', label: 'autoskip_setting_notifications' },
+  { key: 'useAniSkip', label: 'autoskip_setting_aniskip' },
+  { key: 'debug', label: 'autoskip_setting_debug' }
+];
+
+function escapeAttr(value) {
+  return String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+function buildSettingsHtml({ name, version, settings }) {
+  const rows = SETTING_DEFINITIONS.map(({ key, label }) => {
+    const checked = settings[key] ? 'checked' : '';
+    return `
+      <label style="display:block;margin:6px 0">
+        <input type="checkbox" data-setting="${escapeAttr(key)}" ${checked}/>
+        <span style="margin-left:6px">${escapeAttr(translate(label))}</span>
+      </label>
+    `;
+  }).join('');
+
+  const disableLabel = escapeAttr(translate('autoskip_setting_disable'));
+
+  return `
+    <div id="al-autoskip-settings" style="padding:20px;max-width:420px;color:#fff">
+      <h2 style="color:#FF8A00;margin-top:0">${escapeAttr(name)}</h2>
+      ${rows}
+      <hr style="margin:12px 0;border:0;border-top:1px solid rgba(255,255,255,0.15)"/>
+      <label style="display:block;margin:6px 0">
+        <input type="checkbox" data-global-disable />
+        <span style="margin-left:6px">${disableLabel}</span>
+      </label>
+      <div style="margin-top:10px;font-size:13px;color:#aaa">
+        ${escapeAttr(translate('autoskip_settings_version'))}: ${escapeAttr(version)}
+      </div>
     </div>
   `;
+}
+
+export function showSettingsModal({ name, version, settings, onChange, log }) {
+  const html = buildSettingsHtml({ name, version, settings });
 
   if (typeof Lampa === 'undefined' || !Lampa.Modal) {
     log('warn', 'Settings modal works only inside Lampa.');
@@ -105,5 +144,15 @@ export function showSettingsModal({ name, version, settings, onChange, log }) {
         onChange(key, value);
       };
     });
+
+    const globalDisable = box.querySelector('[data-global-disable]');
+    if (globalDisable) {
+      try {
+        if (typeof Lampa !== 'undefined' && Lampa.Storage && typeof Lampa.Storage.field === 'function') {
+          globalDisable.checked = Lampa.Storage.field('autoskip_disabled') === true;
+        }
+      } catch (e) { /* noop */ }
+      globalDisable.onchange = (e) => persistGlobalDisable(e.target.checked);
+    }
   }, 100);
 }

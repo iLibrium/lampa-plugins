@@ -1,78 +1,90 @@
 import { createLogger } from './logger.js';
-import { loadSegmentCache, loadSettings, saveSegmentCache, saveSettings } from './storage.js';
+import { probe as probeCapabilities } from './capabilities.js';
+import { SettingsStore, SETTINGS_DEFAULTS } from '../storage/SettingsStore.js';
+import { SegmentCache } from '../storage/SegmentCache.js';
+import { getContentId } from '../segments/contentId.js';
+import { followPlayer } from '../lampa/playerEvents.js';
 import { waitForLampa } from '../lampa/waitForLampa.js';
 import { isSettingsApiReady, registerSettingsComponent, showSettingsModal } from '../lampa/settingsUi.js';
-import { getCacheKey, readCachedRanges, writeCachedRanges } from '../segments/cache.js';
-import { isTimeInRanges, normalizeRanges, rangesEqual } from '../segments/ranges.js';
-import { AudioSegmentDetector } from '../segments/providers/audioDetector.js';
-import { getRangesFromPlayerData } from '../segments/providers/playerData.js';
-import { getRangesFromTextTracks } from '../segments/providers/textTracks.js';
-import { SkipButton } from '../ui/skipButton/SkipButton.js';
-
-const SOURCE_PRIORITY = {
-  cache: 0,
-  audio: 1,
-  textTracks: 2,
-  playerData: 3
-};
+import { normalizeRanges } from '../segments/ranges.js';
+import { SegmentResolver } from '../segments/SegmentResolver.js';
+import { MetadataProvider } from '../segments/providers/MetadataProvider.js';
+import { ChaptersProvider } from '../segments/providers/ChaptersProvider.js';
+import { AudioProvider } from '../segments/providers/AudioProvider.js';
+import { AniSkipProvider } from '../segments/providers/AniSkipProvider.js';
+import { PlaybackController } from '../playback/PlaybackController.js';
+import { VisibilityGuard } from '../playback/visibilityGuard.js';
+import { hasNativeSkip } from '../playback/nativeSkipDetect.js';
+import { SkipPrompt } from '../ui/SkipPrompt/SkipPrompt.js';
+import { t as translate, registerTranslations } from '../util/i18n.js';
 
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '1.0.6';
+    this.version = '2.0.0';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';
     this.log = createLogger({ tag: this.logTag });
 
-    this.settings = Object.assign({
-      enabled: true,
-      autoStart: true,
-      skipIntro: true,
-      skipCredits: true,
-      showNotifications: true,
-      debug: false
-    }, loadSettings());
+    this.capabilities = probeCapabilities();
 
-    this.segmentCache = loadSegmentCache();
+    this.settingsStore = new SettingsStore({ log: this.log });
+    this.settings = Object.assign({}, SETTINGS_DEFAULTS, this.settingsStore.load());
+    this.settingsStore.update(this.settings);
+
+    this.segmentCache = new SegmentCache({ log: this.log });
+    this.segmentCache.load();
+
+    this.resolver = new SegmentResolver();
+    this.playback = new PlaybackController({
+      resolver: this.resolver,
+      getSettings: () => this.settings,
+      onSegmentEnter: (segment, range, isSame) => this._handleSegmentEnter(segment, range, isSame),
+      onSegmentLeave: () => this._handleSegmentLeave(),
+      log: this.log
+    });
+
+    this.metadataProvider = new MetadataProvider({ log: this.log });
+    this.chaptersProvider = new ChaptersProvider({ log: this.log });
+    this.audioProvider = new AudioProvider({
+      log: this.log,
+      onUpdate: (ranges, meta) => this._onProviderUpdate('audio', ranges, meta)
+    });
+    this.aniSkipProvider = new AniSkipProvider({
+      log: this.log,
+      getSettings: () => this.settings
+    });
+
+    this.visibilityGuard = new VisibilityGuard({
+      log: this.log,
+      onResume: () => {
+        if (this.audioProvider) this.audioProvider.resetSession();
+        if (this.settings.debug) this.log('log', 'audio buffer reset on visibility resume');
+      }
+    });
+
+    this.skipPrompt = new SkipPrompt({
+      log: this.log,
+      durationMs: 5000,
+      onSkip: (segment) => {
+        const target = segment || this.playback.getActiveSegment();
+        if (!target) return;
+        this.performSkip(target);
+      },
+      onCancel: (segment) => {
+        const target = segment || this.playback.getActiveSegment();
+        if (target) this.playback.markDismissed(target);
+      }
+    });
 
     this.isRunning = false;
     this.video = null;
-    this.timeHandler = null;
-
-    this.introSkipped = false;
-    this.creditsSkipped = false;
-    this.activeSegment = null;
-    this.activeSegmentRange = null;
-    this.segmentRanges = { intro: [], credits: [] };
-    this.segmentSources = { intro: null, credits: null };
-
     this._bindedOnLoadedMeta = null;
     this._bindedOnPlaying = null;
     this._settingsRegistered = false;
     this._cacheSaveTimer = null;
     this._cachePendingKey = null;
     this._cachePendingRanges = null;
-
-    this.rmsConfig = {
-      windowSec: 0.5,
-      baselineWindows: 120,
-      zThreshold: 1.4,
-      minSegmentSec: 8,
-      mergeGapSec: 1
-    };
-
-    this.audioDetector = new AudioSegmentDetector({
-      config: this.rmsConfig,
-      log: this.log,
-      onUpdate: (ranges, meta) => this.onRangesDetected('audio', ranges, meta)
-    });
-
-    this.skipButton = new SkipButton({
-      onClick: () => {
-        if (!this.activeSegment) return;
-        this.performSkip(this.activeSegment);
-      }
-    });
 
     this.init();
   }
@@ -81,9 +93,11 @@ export class AutoSkipPlugin {
     waitForLampa({
       predicate: () => typeof Lampa !== 'undefined' && Lampa.Player && Lampa.Player.listener,
       onReady: () => {
+        registerTranslations();
         this.addSettingsToLampa();
         this.listenPlayer();
         if (this.settings.autoStart && this.settings.enabled) this.start();
+        if (this.settings.debug) this.log('log', 'capabilities', this.capabilities);
         this.log('log', `initialized (${this.version}).`);
       },
       onTimeout: () => {
@@ -94,7 +108,7 @@ export class AutoSkipPlugin {
   }
 
   addSettingsToLampa() {
-    const icon = '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>';
+    const icon = '<svg width="24" height="24" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg>';
     const maxAttempts = 30;
     const retryDelayMs = 500;
 
@@ -138,31 +152,47 @@ export class AutoSkipPlugin {
       settings: this.settings,
       onChange: (key, value) => {
         this.settings[key] = value;
-        saveSettings(this.settings);
+        this.settingsStore.set(key, value);
       },
       log: this.log
     });
   }
 
   listenPlayer() {
-    if (typeof Lampa !== 'undefined' && Lampa.Player && Lampa.Player.listener) {
-      Lampa.Player.listener.follow('start', () => this.onPlayerStart());
-      Lampa.Player.listener.follow('stop', () => this.onPlayerStop());
-    }
+    followPlayer({
+      start: () => this.onPlayerStart(),
+      stop: () => this.onPlayerStop()
+    });
+  }
+
+  start() {
+    this.isRunning = true;
+    this.log('log', 'auto-skip started.');
+  }
+
+  stop() {
+    this.isRunning = false;
+    this.log('log', 'auto-skip stopped.');
   }
 
   onPlayerStart() {
     if (!this.settings.enabled) return;
+    if (hasNativeSkip()) {
+      if (this.settings.debug) this.log('log', 'native skip metadata detected; plugin yields.');
+      return;
+    }
 
-    this.resetSession();
-    this.hideSkipButton();
+    this.resolver.reset();
+    this.playback.resetSession();
+    this.visibilityGuard.attach();
+    this._hideSkipButton();
 
     const attach = () => {
-      const video = this.getVideo();
+      const video = this._getVideo();
       if (!video) return false;
 
       this.video = video;
-      const onReady = () => this.onVideoReady();
+      const onReady = () => this._onVideoReady();
 
       if (!Number.isFinite(video.duration)) {
         this._bindedOnLoadedMeta = onReady;
@@ -171,9 +201,7 @@ export class AutoSkipPlugin {
         onReady();
       }
 
-      this._bindedOnPlaying = () => {
-        if (!this.timeHandler) this.attachTimeHandler();
-      };
+      this._bindedOnPlaying = () => this.playback.attach(this.video);
       video.addEventListener('playing', this._bindedOnPlaying);
 
       return true;
@@ -188,119 +216,82 @@ export class AutoSkipPlugin {
     poll();
   }
 
-  onVideoReady() {
-    this.applyCachedSegments();
-    this.onRangesDetected('playerData', getRangesFromPlayerData(), { passive: true });
-    this.onRangesDetected('textTracks', getRangesFromTextTracks(this.video), { passive: true });
+  _onVideoReady() {
+    this._applyCachedSegments();
+    this._runProvider(this.metadataProvider);
+    this._runProvider(this.chaptersProvider);
+    this._runProvider(this.aniSkipProvider);
 
-    this.attachTimeHandler();
-    this.audioDetector.start(this.video);
-  }
-
-  attachTimeHandler() {
-    if (!this.video) return;
-    if (this.timeHandler) return;
-    this.timeHandler = () => this.checkSkip();
-    this.video.addEventListener('timeupdate', this.timeHandler);
+    this.playback.attach(this.video);
+    this.skipPrompt.attachToVideo(this.video);
+    this._runProvider(this.audioProvider);
   }
 
   onPlayerStop() {
-    if (this.video && this.timeHandler) {
-      this.video.removeEventListener('timeupdate', this.timeHandler);
-    }
     if (this.video && this._bindedOnLoadedMeta) {
-      this.video.removeEventListener('loadedmetadata', this._bindedOnLoadedMeta);
+      try { this.video.removeEventListener('loadedmetadata', this._bindedOnLoadedMeta); } catch (e) { /* noop */ }
     }
     if (this.video && this._bindedOnPlaying) {
-      this.video.removeEventListener('playing', this._bindedOnPlaying);
+      try { this.video.removeEventListener('playing', this._bindedOnPlaying); } catch (e) { /* noop */ }
     }
 
-    this.audioDetector.stop();
-    this.flushPendingCacheSave();
+    this.playback.detach();
+    this.audioProvider.cancel();
+    this.audioProvider.reset();
+    this.visibilityGuard.detach();
+    this._flushPendingCacheSave();
 
     this.video = null;
-    this.timeHandler = null;
     this._bindedOnLoadedMeta = null;
     this._bindedOnPlaying = null;
-    this.activeSegment = null;
-    this.activeSegmentRange = null;
-    this.segmentRanges = { intro: [], credits: [] };
-    this.segmentSources = { intro: null, credits: null };
 
-    this.hideSkipButton(true);
+    this.resolver.reset();
+    this.playback.resetSession();
+    this._hideSkipButton(true);
   }
 
-  resetSession() {
-    this.introSkipped = false;
-    this.creditsSkipped = false;
-    this.activeSegment = null;
-    this.activeSegmentRange = null;
-    this.segmentRanges = { intro: [], credits: [] };
-    this.segmentSources = { intro: null, credits: null };
+  _runProvider(provider) {
+    if (!provider) return;
+    try {
+      if (!provider.isApplicable({ video: this.video, capabilities: this.capabilities })) return;
+      const result = provider.run(
+        { video: this.video, capabilities: this.capabilities },
+        (ranges, meta) => this._onProviderUpdate(provider.name, ranges, meta)
+      );
+      if (result && typeof result.catch === 'function') {
+        result.catch((err) => this.log('warn', `${provider.name} provider failed`, err));
+      }
+    } catch (err) {
+      this.log('warn', `${provider.name} provider threw`, err);
+    }
   }
 
-  start() {
-    this.isRunning = true;
-    this.log('log', 'auto-skip started.');
-  }
-
-  stop() {
-    this.isRunning = false;
-    this.log('log', 'auto-skip stopped.');
-  }
-
-  checkSkip() {
+  _onProviderUpdate(source, rawRanges, meta) {
     if (!this.video) return;
-    const t = this.video.currentTime;
-    const d = this.video.duration;
-    if (!Number.isFinite(d) || d <= 0) return;
+    const normalized = normalizeRanges(rawRanges, this.video.duration);
+    const updated = this.resolver.apply(source, normalized);
+    if (!updated) return;
 
-    const segment = this.detectSegment(t);
-
-    if (segment) {
-      this.showSkipButton(segment);
-    } else if (this.activeSegment) {
-      this.hideSkipButton();
-    }
+    if (this.settings.debug) this._logSegmentRanges(source, this.resolver.getRanges(), meta);
+    if (source !== 'cache') this._scheduleCacheSave(this.resolver.getRanges());
   }
 
-  detectSegment(time) {
-    return this.detectSegmentFromRanges(time);
-  }
-
-  detectSegmentFromRanges(time) {
-    if (this.settings.skipIntro && !this.introSkipped) {
-      if (isTimeInRanges(time, this.segmentRanges.intro)) return 'intro';
-    }
-    if (this.settings.skipCredits && !this.creditsSkipped) {
-      if (isTimeInRanges(time, this.segmentRanges.credits)) return 'credits';
-    }
-    return null;
-  }
-
-  showSkipButton(segment) {
-    const isSame = this.activeSegment === segment;
-    const wasVisible = this.skipButton.isVisible();
-    this.activeSegment = segment;
-    this.skipButton.show();
-
-    if (!isSame || !wasVisible) {
-      this.activeSegmentRange = this.segmentRanges[segment]?.length ? Object.assign({}, this.segmentRanges[segment][0]) : null;
+  _handleSegmentEnter(segment, range, isSame) {
+    if (!isSame || !this.skipPrompt.isVisible()) {
+      this.skipPrompt.show(segment);
       const t = this.video && Number.isFinite(this.video.currentTime) ? this.video.currentTime.toFixed(2) : 'n/a';
-      this.log('log', `segment detected -> ${segment} at ${t}s`, {
-        ranges: this.segmentRanges[segment] || [],
-        duration: this.video ? this.video.duration : undefined,
-        sources: this.segmentSources
-      });
-      this.skipButton.restartAnimation();
+      if (this.settings.debug) {
+        this.log('log', `segment detected -> ${segment} at ${t}s`, {
+          range,
+          duration: this.video ? this.video.duration : undefined,
+          sources: this.resolver.getSources()
+        });
+      }
     }
   }
 
-  hideSkipButton(destroy = false) {
-    this.skipButton.hide();
-    if (destroy) this.skipButton.destroy();
-    this.activeSegment = null;
-    this.activeSegmentRange = null;
+  _handleSegmentLeave() {
+    this._hideSkipButton();
   }
 
   performSkip(segment) {
@@ -308,30 +299,31 @@ export class AutoSkipPlugin {
     const duration = this.video.duration;
     if (!Number.isFinite(duration) || duration <= 0) return;
 
+    const ranges = this.resolver.getRanges();
     if (segment === 'intro') {
-      const intro = (this.activeSegmentRange && this.activeSegment === 'intro')
-        ? this.activeSegmentRange
-        : (this.segmentRanges.intro.length ? this.segmentRanges.intro[0] : null);
-      if (!intro) return;
-      this.introSkipped = true;
-      this.safeSeek(intro.end);
-      this.notify('Пропущено вступление');
+      const range = (this.playback.getActiveRange() && this.playback.getActiveSegment() === 'intro')
+        ? this.playback.getActiveRange()
+        : (ranges.intro && ranges.intro.length ? ranges.intro[0] : null);
+      if (!range) return;
+      this.playback.markSkipped('intro');
+      this._safeSeek(range.end);
+      this._notify(translate('autoskip_intro_skipped'));
     }
 
     if (segment === 'credits') {
-      const credits = (this.activeSegmentRange && this.activeSegment === 'credits')
-        ? this.activeSegmentRange
-        : (this.segmentRanges.credits.length ? this.segmentRanges.credits[0] : null);
-      if (!credits) return;
-      this.creditsSkipped = true;
-      this.safeSeek(Math.min(duration - 1, Math.max(0, credits.end)));
-      this.notify('Пропущены титры');
+      const range = (this.playback.getActiveRange() && this.playback.getActiveSegment() === 'credits')
+        ? this.playback.getActiveRange()
+        : (ranges.credits && ranges.credits.length ? ranges.credits[0] : null);
+      if (!range) return;
+      this.playback.markSkipped('credits');
+      this._safeSeek(Math.min(duration - 1, Math.max(0, range.end)));
+      this._notify(translate('autoskip_credits_skipped'));
     }
 
-    this.hideSkipButton();
+    this._hideSkipButton();
   }
 
-  safeSeek(target) {
+  _safeSeek(target) {
     try {
       if (Number.isFinite(target)) this.video.currentTime = target;
     } catch (e) {
@@ -339,80 +331,59 @@ export class AutoSkipPlugin {
     }
   }
 
-  notify(msg) {
+  _notify(msg) {
     if (!this.settings.showNotifications) return;
     if (typeof Lampa !== 'undefined' && Lampa.Noty) Lampa.Noty.show(msg);
     else this.log('log', msg);
   }
 
-  applyCachedSegments() {
-    const key = getCacheKey(this.video);
-    if (!key) return;
-    const cached = readCachedRanges(this.segmentCache, key);
+  _hideSkipButton(destroy = false) {
+    this.skipPrompt.hide();
+    if (destroy) this.skipPrompt.destroy();
+  }
+
+  _applyCachedSegments() {
+    const ids = getContentId(this.video);
+    if (!ids || !ids.primary) return;
+
+    let cached = this.segmentCache.read(ids.primary);
+    let key = ids.primary;
+    if (!cached && ids.legacy) {
+      cached = this.segmentCache.read(ids.legacy);
+      if (cached) {
+        this.segmentCache.write(ids.primary, cached);
+        this.segmentCache.scheduleSave();
+      }
+    }
     if (!cached) return;
 
     const normalized = normalizeRanges(cached, this.video.duration);
     if (!normalized.intro.length && !normalized.credits.length) return;
 
-    const updated = this.applyRangesWithPriority('cache', normalized);
-    if (updated) {
-      this.logSegmentRanges('cache', this.segmentRanges, { key });
+    const updated = this.resolver.apply('cache', normalized);
+    if (updated && this.settings.debug) {
+      this._logSegmentRanges('cache', this.resolver.getRanges(), { key });
     }
   }
 
-  onRangesDetected(source, ranges, meta = null) {
-    if (!this.video) return;
-    const normalized = normalizeRanges(ranges, this.video.duration);
-    const updated = this.applyRangesWithPriority(source, normalized);
-    if (!updated) return;
+  _scheduleCacheSave(ranges) {
+    const ids = getContentId(this.video);
+    if (!ids || !ids.primary) return;
+    if (!ranges) return;
+    if ((!ranges.intro || !ranges.intro.length) && (!ranges.credits || !ranges.credits.length)) return;
 
-    this.logSegmentRanges(source, this.segmentRanges, meta);
-
-    if (source !== 'cache') {
-      this.saveSegmentsToCache(this.segmentRanges);
-    }
-  }
-
-  applyRangesWithPriority(source, normalizedRanges) {
-    const introUpdated = this.applyKindWithPriority(source, 'intro', normalizedRanges.intro);
-    const creditsUpdated = this.applyKindWithPriority(source, 'credits', normalizedRanges.credits);
-    return introUpdated || creditsUpdated;
-  }
-
-  applyKindWithPriority(source, kind, incomingRanges) {
-    if (!incomingRanges.length) return false;
-
-    const incomingPriority = SOURCE_PRIORITY[source] ?? 0;
-    const currentSource = this.segmentSources[kind];
-    const currentPriority = currentSource ? (SOURCE_PRIORITY[currentSource] ?? 0) : -1;
-
-    const shouldReplace = !this.segmentRanges[kind].length || incomingPriority >= currentPriority;
-    if (!shouldReplace) return false;
-    if (rangesEqual(this.segmentRanges[kind], incomingRanges)) return false;
-
-    this.segmentRanges[kind] = incomingRanges;
-    this.segmentSources[kind] = source;
-    return true;
-  }
-
-  saveSegmentsToCache(ranges) {
-    const key = getCacheKey(this.video);
-    if (!key) return;
-    if (!ranges || (!ranges.intro || !ranges.intro.length) && (!ranges.credits || !ranges.credits.length)) return;
-
-    this._cachePendingKey = key;
+    this._cachePendingKey = ids.primary;
     this._cachePendingRanges = {
       intro: (ranges.intro || []).slice(),
       credits: (ranges.credits || []).slice()
     };
 
     if (this._cacheSaveTimer) return;
-    this._cacheSaveTimer = setTimeout(() => this.flushPendingCacheSave(), 1500);
+    this._cacheSaveTimer = setTimeout(() => this._flushPendingCacheSave(), 1500);
   }
 
-  flushPendingCacheSave() {
+  _flushPendingCacheSave() {
     if (!this._cacheSaveTimer && !this._cachePendingKey) return;
-
     if (this._cacheSaveTimer) {
       clearTimeout(this._cacheSaveTimer);
       this._cacheSaveTimer = null;
@@ -424,26 +395,23 @@ export class AutoSkipPlugin {
     this._cachePendingRanges = null;
 
     if (!key || !ranges) return;
-    writeCachedRanges(this.segmentCache, key, ranges);
     try {
-      saveSegmentCache(this.segmentCache);
-      if (this.settings.debug) {
-        this.log('log', 'segments cached', { key, intro: ranges.intro, credits: ranges.credits });
-      }
+      this.segmentCache.write(key, ranges);
+      this.segmentCache.save();
+      if (this.settings.debug) this.log('log', 'segments cached', { key, intro: ranges.intro, credits: ranges.credits });
     } catch (e) {
       this.log('warn', 'Failed to save cache:', e);
     }
   }
 
-  logSegmentRanges(source, ranges, meta = null) {
-    if (!this.settings.debug) return;
+  _logSegmentRanges(source, ranges, meta = null) {
     const format = (seg) => seg.map((r) => `${r.start.toFixed(1)}-${r.end.toFixed(1)}s`).join(', ') || 'none';
     const intro = ranges.intro || [];
     const credits = ranges.credits || [];
     this.log('log', `segments from ${source}: intro=${format(intro)}; credits=${format(credits)}`, meta);
   }
 
-  getVideo() {
+  _getVideo() {
     return document.querySelector('video');
   }
 }
