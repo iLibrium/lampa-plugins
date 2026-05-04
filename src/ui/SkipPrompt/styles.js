@@ -25,6 +25,15 @@ export function ensureSkipPromptStyles() {
       position: relative;
       overflow: hidden;
     }
+    .autoskip-prompt__skip-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35em;
+    }
+    .autoskip-prompt__confidence-mark {
+      font-size: 0.85em;
+      opacity: 0.7;
+    }
     .autoskip-prompt__progress {
       position: absolute;
       left: 0;
@@ -37,6 +46,12 @@ export function ensureSkipPromptStyles() {
       will-change: transform;
       pointer-events: none;
       border-radius: 0 0 1em 1em;
+    }
+    .autoskip-prompt--confidence-low .autoskip-prompt__progress {
+      background: rgba(255, 138, 0, 0.55);
+    }
+    .autoskip-prompt--confidence-medium .autoskip-prompt__progress {
+      background: rgba(255, 138, 0, 0.85);
     }
     .autoskip-prompt--standalone {
       position: fixed;

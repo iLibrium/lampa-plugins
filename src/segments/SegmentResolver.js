@@ -3,15 +3,21 @@ import { normalizeRanges, rangesEqual } from './ranges.js';
 const SOURCE_PRIORITY = {
   cache: 0,
   audio: 1,
-  chapters: 2,
-  metadata: 3,
-  theintrodb: 4,
-  aniskip: 5
+  visual: 2,
+  prefetch_audio: 3,
+  subtitle: 4,
+  chapters: 5,
+  metadata: 6,
+  theintrodb: 7,
+  aniskip: 8
 };
 
 const SOURCE_CONFIDENCE = {
   cache: 'medium',
   audio: 'low',
+  visual: 'medium',
+  prefetch_audio: 'medium',
+  subtitle: 'medium',
   chapters: 'high',
   metadata: 'high',
   theintrodb: 'high',

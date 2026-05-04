@@ -10,9 +10,19 @@ export function ensureTimelineMarkerStyles() {
     .player-panel__timeline-segment--autoskip {
       background-color: rgba(255, 138, 0, 0.55);
       pointer-events: none;
+      transition: background-color 0.2s linear;
     }
     .player-panel__timeline-segment--autoskip-credits {
       background-color: rgba(255, 138, 0, 0.45);
+    }
+    .player-panel__timeline-segment--autoskip-low {
+      background-color: rgba(255, 138, 0, 0.28);
+    }
+    .player-panel__timeline-segment--autoskip-medium {
+      background-color: rgba(255, 138, 0, 0.45);
+    }
+    .player-panel__timeline-segment--autoskip-high {
+      background-color: rgba(255, 138, 0, 0.65);
     }
   `;
 

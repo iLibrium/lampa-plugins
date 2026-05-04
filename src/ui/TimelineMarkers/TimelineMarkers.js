@@ -33,12 +33,13 @@ export class TimelineMarkers {
     this._lastSnapshot = null;
   }
 
-  setRanges(ranges, duration) {
+  setRanges(ranges, duration, confidence) {
     this.ranges = {
       intro: Array.isArray(ranges && ranges.intro) ? ranges.intro : [],
       credits: Array.isArray(ranges && ranges.credits) ? ranges.credits : []
     };
     if (Number.isFinite(duration) && duration > 0) this.duration = duration;
+    this.confidence = confidence || { intro: 'high', credits: 'high' };
     this._render();
   }
 
@@ -76,7 +77,7 @@ export class TimelineMarkers {
   }
 
   _snapshot() {
-    return JSON.stringify({ ranges: this.ranges, duration: this.duration });
+    return JSON.stringify({ ranges: this.ranges, duration: this.duration, confidence: this.confidence });
   }
 
   _render() {
@@ -95,6 +96,7 @@ export class TimelineMarkers {
 
     ['intro', 'credits'].forEach((kind) => {
       const ranges = this.ranges[kind] || [];
+      const confidence = (this.confidence && this.confidence[kind]) || 'high';
       ranges.forEach((range) => {
         const start = Math.max(0, Number(range.start));
         const end = Math.max(start, Number(range.end));
@@ -106,7 +108,7 @@ export class TimelineMarkers {
         if (width <= 0) return;
 
         const seg = document.createElement('div');
-        seg.className = `player-panel__timeline-segment player-panel__timeline-segment--autoskip player-panel__timeline-segment--autoskip-${kind}`;
+        seg.className = `player-panel__timeline-segment player-panel__timeline-segment--autoskip player-panel__timeline-segment--autoskip-${kind} player-panel__timeline-segment--autoskip-${confidence}`;
         seg.style.left = `${left}%`;
         seg.style.width = `${width}%`;
         this.timeline.appendChild(seg);

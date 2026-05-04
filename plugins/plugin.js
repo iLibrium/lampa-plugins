@@ -879,14 +879,20 @@
   var SOURCE_PRIORITY = {
     cache: 0,
     audio: 1,
-    chapters: 2,
-    metadata: 3,
-    theintrodb: 4,
-    aniskip: 5
+    visual: 2,
+    prefetch_audio: 3,
+    subtitle: 4,
+    chapters: 5,
+    metadata: 6,
+    theintrodb: 7,
+    aniskip: 8
   };
   var SOURCE_CONFIDENCE = {
     cache: "medium",
     audio: "low",
+    visual: "medium",
+    prefetch_audio: "medium",
+    subtitle: "medium",
     chapters: "high",
     metadata: "high",
     theintrodb: "high",
@@ -1469,48 +1475,124 @@
 
   // src/segments/providers/aniskip/tmdbToMal.js
   var TMDB_TO_MAL = {
-    // Attack on Titan / Атака титанов
     1429: 16498,
-    // Demon Slayer / Клинок, рассекающий демонов
+    // Attack on Titan
     85937: 38e3,
-    // Jujutsu Kaisen / Магическая битва
+    // Demon Slayer
     95479: 40748,
-    // My Hero Academia / Моя геройская академия
+    // Jujutsu Kaisen
     65930: 31964,
-    // One Punch Man / Ванпанчмен
+    // My Hero Academia
     63926: 30276,
-    // Death Note / Тетрадь смерти
+    // One Punch Man
     13916: 1535,
-    // Steins;Gate
+    // Death Note
     31910: 9253,
-    // Code Geass / Код Гиасс
+    // Steins;Gate
     16245: 1575,
-    // Naruto Shippuden / Наруто: Ураганные хроники
+    // Code Geass
     46260: 1735,
-    // Bleach: Thousand-Year Blood War
+    // Naruto Shippuden
+    46298: 20,
+    // Naruto
     118646: 41467,
-    // Spy x Family
+    // Bleach: TYBW
+    30984: 269,
+    // Bleach (original)
     120089: 50265,
-    // Chainsaw Man
+    // Spy x Family
     114410: 44511,
-    // Re:Zero
+    // Chainsaw Man
     65840: 31240,
-    // Mob Psycho 100
+    // Re:Zero
     65786: 32182,
-    // Vinland Saga
+    // Mob Psycho 100
     82684: 37521,
-    // Made in Abyss
+    // Vinland Saga
     72636: 34599,
-    // Konosuba
+    // Made in Abyss
     65754: 30831,
-    // Mushoku Tensei
+    // Konosuba
     104134: 39535,
-    // Solo Leveling
+    // Mushoku Tensei
     127532: 52299,
-    // Frieren / Провожающая в последний путь Фрирен
+    // Solo Leveling
     209867: 52991,
+    // Frieren
+    105248: 42310,
     // Cyberpunk: Edgerunners
-    105248: 42310
+    37854: 21,
+    // One Piece
+    60863: 22319,
+    // Tokyo Ghoul
+    62741: 30694,
+    // Tokyo Ghoul: Re
+    106057: 40028,
+    // Attack on Titan: Final Season
+    60572: 11061,
+    // Hunter x Hunter (2011)
+    93685: 38161,
+    // Dr. Stone
+    95479: 40748,
+    // Jujutsu Kaisen
+    68552: 28977,
+    // Gintama
+    61374: 11757,
+    // Sword Art Online
+    77834: 31043,
+    // Boku no Hero Academia (other split)
+    60863: 22319,
+    // Tokyo Ghoul
+    101414: 44037,
+    // Horimiya
+    85688: 38040,
+    // Kaguya-sama: Love is War
+    93902: 39247,
+    // Beastars
+    114795: 44074,
+    // Komi-san
+    86031: 35790,
+    // Tate no Yuusha
+    124364: 51019,
+    // Oshi no Ko
+    221463: 56964,
+    // Dandadan
+    157084: 50796,
+    // Hell's Paradise
+    220150: 53924,
+    // The Apothecary Diaries
+    93684: 36474,
+    // Yakusoku no Neverland
+    80564: 31240,
+    // (Re:Zero alt)
+    207865: 56230,
+    // Wind Breaker
+    223225: 58460,
+    // Suicide Squad Isekai
+    240411: 60022,
+    // Dan Da Dan (alt)
+    73223: 33352,
+    // Violet Evergarden
+    82665: 37347,
+    // Goblin Slayer
+    138502: 50709,
+    // Lycoris Recoil
+    119495: 47917,
+    // Ranking of Kings
+    76669: 33486,
+    // Boku no Hero Academia (split alt)
+    79220: 35073,
+    // Overlord III (split alt)
+    31911: 9253,
+    // Steins;Gate (alt)
+    65930: 31964,
+    // My Hero Academia
+    46298: 20,
+    // Naruto
+    37854: 21,
+    // One Piece
+    74258: 34134
+    // One Punch Man Season 2
   };
 
   // src/segments/providers/AniSkipProvider.js
@@ -1968,6 +2050,673 @@
     }
   };
 
+  // src/segments/providers/SubtitleProvider.js
+  var MUSIC_MARKERS = /[♪♫♬♩]|\[(music|opening|theme|song|musical|opening theme|theme song|intro)\]|\((music|theme|opening|musical|opening theme|theme song)\)|♪|♫|♬|♩/i;
+  var RECAP_MARKERS = /\bpreviously on\b|ранее в|в предыдущ|в прошлы(й|х) сери/i;
+  var CREDITS_MARKERS_EN = /\b(directed by|created by|written by|produced by|executive producer|cast|music by|edited by|editor|cinematography|director of photography|costumes by|production designer|original music)\b/i;
+  var CREDITS_MARKERS_RU = /\b(режиссёр|режиссер|сценар|продюсер|оператор|композитор|производство|в ролях|монтаж)\b/iu;
+  var COLLECTION_RETRIES = 12;
+  var COLLECTION_INTERVAL_MS = 600;
+  var MIN_INTRO_LEN_SEC = 8;
+  var MIN_RECAP_LEN_SEC = 10;
+  var SILENCE_GAP_FOR_CREDITS_SEC = 75;
+  function maybeFetchSubtitleUrl(url, timeoutMs = 6e3) {
+    if (typeof fetch !== "function")
+      return Promise.resolve(null);
+    if (!url || typeof url !== "string")
+      return Promise.resolve(null);
+    let timer = null;
+    const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    const opts = { method: "GET", mode: "cors", credentials: "omit" };
+    if (ctrl) {
+      opts.signal = ctrl.signal;
+      timer = setTimeout(() => {
+        try {
+          ctrl.abort();
+        } catch (e) {
+        }
+      }, timeoutMs);
+    }
+    return fetch(url, opts).then((res) => res.ok ? res.text() : null).catch(() => null).finally(() => {
+      if (timer)
+        clearTimeout(timer);
+    });
+  }
+  function parseTimestamp(input) {
+    if (!input)
+      return NaN;
+    const cleaned = String(input).trim().replace(",", ".");
+    const m = cleaned.match(/^(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:\.(\d{1,3}))?$/);
+    if (!m)
+      return NaN;
+    const hours = m[1] ? Number(m[1]) : 0;
+    const minutes = Number(m[2]);
+    const seconds = Number(m[3]);
+    const ms = m[4] ? Number(m[4].padEnd(3, "0")) : 0;
+    return hours * 3600 + minutes * 60 + seconds + ms / 1e3;
+  }
+  function parseSrtOrVtt(text) {
+    if (!text || typeof text !== "string")
+      return [];
+    const cues = [];
+    const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i].trim();
+      if (!line || line === "WEBVTT" || line.startsWith("NOTE") || line.startsWith("STYLE")) {
+        i += 1;
+        continue;
+      }
+      let timecode = line;
+      if (!/-->/.test(timecode)) {
+        i += 1;
+        if (i >= lines.length)
+          break;
+        timecode = lines[i].trim();
+        if (!/-->/.test(timecode))
+          continue;
+      }
+      const parts = timecode.split("-->");
+      if (parts.length < 2) {
+        i += 1;
+        continue;
+      }
+      const start = parseTimestamp(parts[0].trim());
+      const end = parseTimestamp(parts[1].trim().split(" ")[0]);
+      i += 1;
+      const buf = [];
+      while (i < lines.length && lines[i].trim() !== "") {
+        buf.push(lines[i]);
+        i += 1;
+      }
+      if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+        cues.push({ start, end, text: buf.join("\n") });
+      }
+      while (i < lines.length && lines[i].trim() === "")
+        i += 1;
+    }
+    return cues;
+  }
+  var SubtitleProvider = class extends ProviderBase {
+    constructor({ log, getSettings }) {
+      super({ name: "subtitle", log });
+      this.getSettings = getSettings || (() => ({}));
+      this._listenerRefs = [];
+    }
+    isApplicable(ctx) {
+      if (!ctx || !ctx.video)
+        return false;
+      if (typeof document === "undefined")
+        return false;
+      return true;
+    }
+    async run(ctx, onUpdate) {
+      const video = ctx.video;
+      const cues = await this._collectCues(video);
+      if (this.cancelled)
+        return;
+      if (!cues || !cues.length)
+        return;
+      const duration = Number.isFinite(video.duration) ? video.duration : 0;
+      if (duration <= 0)
+        return;
+      const ranges = this._analyse(cues, duration);
+      if (!ranges.intro.length && !ranges.credits.length)
+        return;
+      if (this.getSettings().debug) {
+        this.log("log", `subtitle provider found ${cues.length} cues`, { intro: ranges.intro, credits: ranges.credits });
+      }
+      onUpdate(ranges, { confidence: "medium", source: "subtitle", cues: cues.length });
+    }
+    async _collectCues(video) {
+      for (let attempt = 0; attempt < COLLECTION_RETRIES; attempt += 1) {
+        if (this.cancelled)
+          return null;
+        const direct = this._extractTextTracksCues(video);
+        if (direct && direct.length)
+          return direct;
+        const lampaCues = await this._extractLampaCues(video);
+        if (this.cancelled)
+          return null;
+        if (lampaCues && lampaCues.length)
+          return lampaCues;
+        await new Promise((r) => setTimeout(r, COLLECTION_INTERVAL_MS));
+      }
+      return null;
+    }
+    _extractTextTracksCues(video) {
+      if (!video || !video.textTracks)
+        return null;
+      const result = [];
+      for (let i = 0; i < video.textTracks.length; i += 1) {
+        const track = video.textTracks[i];
+        if (!track)
+          continue;
+        if (track.kind && track.kind !== "subtitles" && track.kind !== "captions")
+          continue;
+        const cues = track.cues;
+        if (!cues || !cues.length)
+          continue;
+        for (let j = 0; j < cues.length; j += 1) {
+          const cue = cues[j];
+          if (!cue)
+            continue;
+          const start = Number(cue.startTime);
+          const end = Number(cue.endTime);
+          if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start)
+            continue;
+          result.push({ start, end, text: cue.text || "" });
+        }
+      }
+      return result.length ? result : null;
+    }
+    async _extractLampaCues(video) {
+      const customSubs = video && video.customSubs;
+      if (!customSubs || !customSubs.length)
+        return null;
+      const active = customSubs.find((s) => s && (s.mode === "showing" || s.active === true)) || customSubs[0];
+      if (!active || !active.url)
+        return null;
+      const text = await maybeFetchSubtitleUrl(active.url);
+      if (!text)
+        return null;
+      const cues = parseSrtOrVtt(text);
+      return cues.length ? cues : null;
+    }
+    _analyse(cues, duration) {
+      const ranges = { intro: [], credits: [] };
+      const introZone = duration * 0.3;
+      const creditsZone = duration * 0.7;
+      const introMusic = cues.filter((c) => c.start <= introZone && MUSIC_MARKERS.test(c.text));
+      if (introMusic.length) {
+        const start = Math.min.apply(null, introMusic.map((c) => c.start));
+        const end = Math.max.apply(null, introMusic.map((c) => c.end));
+        if (end - start >= MIN_INTRO_LEN_SEC)
+          ranges.intro.push({ start, end });
+      }
+      if (!ranges.intro.length) {
+        const recap = cues.filter((c) => c.start <= introZone && RECAP_MARKERS.test(c.text));
+        if (recap.length) {
+          const start = Math.min.apply(null, recap.map((c) => c.start));
+          const end = Math.max.apply(null, recap.map((c) => c.end));
+          if (end - start >= MIN_RECAP_LEN_SEC)
+            ranges.intro.push({ start, end });
+        }
+      }
+      const creditsCue = cues.filter((c) => c.start >= creditsZone && (CREDITS_MARKERS_EN.test(c.text) || CREDITS_MARKERS_RU.test(c.text)));
+      if (creditsCue.length) {
+        const start = Math.min.apply(null, creditsCue.map((c) => c.start));
+        ranges.credits.push({ start, end: duration });
+      } else {
+        const lastBody = cues.filter((c) => c.end < creditsZone).pop();
+        const tailCues = cues.filter((c) => c.start >= creditsZone);
+        if (!tailCues.length && lastBody && duration - lastBody.end >= SILENCE_GAP_FOR_CREDITS_SEC) {
+          ranges.credits.push({ start: lastBody.end + 5, end: duration });
+        }
+      }
+      return ranges;
+    }
+  };
+
+  // src/segments/providers/VisualProvider.js
+  var SAMPLE_INTERVAL_MS = 1e3;
+  var CANVAS_WIDTH = 64;
+  var CANVAS_HEIGHT = 36;
+  var BLACK_LUMA_THRESHOLD = 18;
+  var BLACK_PIXEL_RATIO = 0.95;
+  var STATIC_DIFF_THRESHOLD = 6;
+  var MIN_BLACK_RUN_SEC = 4;
+  var MIN_STATIC_RUN_SEC = 20;
+  var MIN_INTRO_LEN_SEC2 = 8;
+  var VisualProvider = class extends ProviderBase {
+    constructor({ log, getSettings }) {
+      super({ name: "visual", log });
+      this.getSettings = getSettings || (() => ({}));
+      this.video = null;
+      this.canvas = null;
+      this.ctx2d = null;
+      this.timer = null;
+      this.samples = [];
+      this.tainted = false;
+      this.lastFrameData = null;
+      this._lastEmit = null;
+    }
+    isApplicable(ctx) {
+      if (!ctx || !ctx.video)
+        return false;
+      if (typeof document === "undefined")
+        return false;
+      if (typeof OffscreenCanvas === "undefined" && typeof document.createElement !== "function")
+        return false;
+      return true;
+    }
+    async run(ctx, onUpdate) {
+      this.video = ctx.video;
+      this.onUpdate = onUpdate;
+      this.canvas = document.createElement("canvas");
+      this.canvas.width = CANVAS_WIDTH;
+      this.canvas.height = CANVAS_HEIGHT;
+      this.ctx2d = this.canvas.getContext("2d", { willReadFrequently: true });
+      if (!this.ctx2d)
+        return;
+      if (!this._probeReadback()) {
+        if (this.getSettings().debug)
+          this.log("warn", "visual provider: video tainted, disabled.");
+        return;
+      }
+      this.samples = [];
+      this.lastFrameData = null;
+      this._lastEmit = null;
+      this._scheduleTick();
+    }
+    cancel() {
+      super.cancel();
+      if (this.timer) {
+        try {
+          clearInterval(this.timer);
+        } catch (e) {
+        }
+        this.timer = null;
+      }
+    }
+    reset() {
+      super.reset();
+      this.video = null;
+      this.canvas = null;
+      this.ctx2d = null;
+      this.samples = [];
+      this.lastFrameData = null;
+      this.tainted = false;
+      this._lastEmit = null;
+    }
+    _probeReadback() {
+      if (!this.video || !this.ctx2d)
+        return false;
+      try {
+        this.ctx2d.drawImage(this.video, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        this.ctx2d.getImageData(0, 0, 2, 2);
+        this.tainted = false;
+        return true;
+      } catch (e) {
+        this.tainted = true;
+        return false;
+      }
+    }
+    _scheduleTick() {
+      if (this.timer)
+        return;
+      this.timer = setInterval(() => this._tick(), SAMPLE_INTERVAL_MS);
+    }
+    _tick() {
+      if (this.cancelled || !this.video || !this.ctx2d)
+        return;
+      const duration = Number.isFinite(this.video.duration) ? this.video.duration : 0;
+      if (duration <= 0)
+        return;
+      const t2 = Number(this.video.currentTime);
+      if (!Number.isFinite(t2))
+        return;
+      const introZone = Math.min(360, duration * 0.3);
+      const creditsZone = Math.max(duration - 300, duration * 0.7);
+      const inIntro = t2 <= introZone;
+      const inCredits = t2 >= creditsZone;
+      if (!inIntro && !inCredits)
+        return;
+      let frameData;
+      try {
+        this.ctx2d.drawImage(this.video, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        frameData = this.ctx2d.getImageData(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+      } catch (e) {
+        this.tainted = true;
+        this.cancel();
+        return;
+      }
+      const sample = this._analyseFrame(frameData);
+      sample.t = t2;
+      sample.diff = this.lastFrameData ? this._diff(frameData, this.lastFrameData) : null;
+      this.lastFrameData = frameData;
+      this.samples.push(sample);
+      while (this.samples.length > 600)
+        this.samples.shift();
+      this._evaluateSegments(duration);
+    }
+    _analyseFrame(imageData) {
+      const data = imageData.data;
+      const len = data.length;
+      let sumLuma = 0;
+      let blackPixels = 0;
+      const total = len >> 2;
+      for (let i = 0; i < len; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        const luma = (r * 299 + g * 587 + b * 114) / 1e3;
+        sumLuma += luma;
+        if (luma < BLACK_LUMA_THRESHOLD)
+          blackPixels += 1;
+      }
+      const meanLuma = sumLuma / total;
+      const blackRatio = blackPixels / total;
+      return { meanLuma, blackRatio };
+    }
+    _diff(a, b) {
+      if (!a || !b)
+        return null;
+      const da = a.data;
+      const db = b.data;
+      const len = Math.min(da.length, db.length);
+      let acc = 0;
+      let count = 0;
+      for (let i = 0; i < len; i += 4) {
+        acc += Math.abs(da[i] - db[i]) + Math.abs(da[i + 1] - db[i + 1]) + Math.abs(da[i + 2] - db[i + 2]);
+        count += 3;
+      }
+      return acc / count;
+    }
+    _evaluateSegments(duration) {
+      if (!this.samples.length)
+        return;
+      const ranges = { intro: [], credits: [] };
+      const introSamples = this.samples.filter((s) => s.t <= Math.min(360, duration * 0.3));
+      const intro = this._findIntroRange(introSamples);
+      if (intro)
+        ranges.intro.push(intro);
+      const creditsSamples = this.samples.filter((s) => s.t >= Math.max(duration - 300, duration * 0.7));
+      const credits = this._findCreditsRange(creditsSamples, duration);
+      if (credits)
+        ranges.credits.push(credits);
+      if (!ranges.intro.length && !ranges.credits.length)
+        return;
+      const sig = JSON.stringify(ranges);
+      if (sig === this._lastEmit)
+        return;
+      this._lastEmit = sig;
+      if (this.onUpdate)
+        this.onUpdate(ranges, { confidence: "medium", source: "visual", samples: this.samples.length });
+    }
+    _findIntroRange(samples) {
+      if (samples.length < 8)
+        return null;
+      let runStart = null;
+      let bestRun = null;
+      for (let i = 0; i < samples.length; i += 1) {
+        const s = samples[i];
+        const isStatic = s.diff !== null && s.diff < STATIC_DIFF_THRESHOLD;
+        const isDarkOrStatic = isStatic || s.blackRatio >= BLACK_PIXEL_RATIO || s.meanLuma < 40;
+        if (isDarkOrStatic) {
+          if (runStart === null)
+            runStart = s.t;
+          const length = s.t - runStart;
+          if (length >= MIN_INTRO_LEN_SEC2 && (!bestRun || length > bestRun.end - bestRun.start)) {
+            bestRun = { start: runStart, end: s.t };
+          }
+        } else {
+          runStart = null;
+        }
+      }
+      return bestRun;
+    }
+    _findCreditsRange(samples, duration) {
+      if (samples.length < 8)
+        return null;
+      let runStart = null;
+      for (let i = 0; i < samples.length; i += 1) {
+        const s = samples[i];
+        const isBlack = s.blackRatio >= BLACK_PIXEL_RATIO || s.meanLuma < 30;
+        const isStatic = s.diff !== null && s.diff < STATIC_DIFF_THRESHOLD;
+        if (isBlack || isStatic) {
+          if (runStart === null)
+            runStart = s.t;
+          if (i === samples.length - 1) {
+            const length = s.t - runStart;
+            if (length >= MIN_BLACK_RUN_SEC + MIN_STATIC_RUN_SEC * 0.4) {
+              return { start: runStart, end: duration };
+            }
+          }
+        } else {
+          runStart = null;
+        }
+      }
+      return null;
+    }
+  };
+
+  // src/segments/providers/PrefetchAudioProvider.js
+  var HEAD_TIMEOUT_MS = 4e3;
+  var FETCH_TIMEOUT_MS2 = 3e4;
+  var MAX_INTRO_BYTES = 8 * 1024 * 1024;
+  var MAX_CREDITS_BYTES = 8 * 1024 * 1024;
+  var RMS_WINDOW_SEC = 0.5;
+  var BASELINE_WINDOWS = 30;
+  var MIN_BASELINE_RMS = 0.012;
+  var MIN_THRESHOLD = 0.01;
+  var ABS_RMS_FLOOR = 0.04;
+  var MIN_INTRO_SEG_SEC = 6;
+  var MERGE_GAP_SEC = 3;
+  var Z_THRESHOLD = 1.5;
+  function fetchWithTimeout2(url, options, timeoutMs) {
+    if (typeof fetch !== "function")
+      return Promise.reject(new Error("fetch unavailable"));
+    let timer = null;
+    const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    const opts = Object.assign({}, options || {});
+    if (ctrl) {
+      opts.signal = ctrl.signal;
+      timer = setTimeout(() => {
+        try {
+          ctrl.abort();
+        } catch (e) {
+        }
+      }, timeoutMs);
+    }
+    return fetch(url, opts).finally(() => {
+      if (timer)
+        clearTimeout(timer);
+    });
+  }
+  function isMp4ContentType(ct) {
+    if (!ct)
+      return false;
+    const lowered = String(ct).toLowerCase();
+    return lowered.indexOf("mp4") !== -1 || lowered.indexOf("m4a") !== -1;
+  }
+  function urlLooksLikeMp4(url) {
+    if (!url || typeof url !== "string")
+      return false;
+    return /\.(mp4|m4v|m4a)(\?|#|$)/i.test(url);
+  }
+  var PrefetchAudioProvider = class extends ProviderBase {
+    constructor({ log, getSettings }) {
+      super({ name: "prefetch_audio", log });
+      this.getSettings = getSettings || (() => ({}));
+      this._abort = null;
+    }
+    isApplicable(ctx) {
+      if (!ctx || !ctx.video)
+        return false;
+      if (typeof fetch !== "function")
+        return false;
+      const AudioCtx = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
+      if (!AudioCtx)
+        return false;
+      if (typeof AudioCtx.prototype.decodeAudioData !== "function" && typeof new AudioCtx().decodeAudioData !== "function")
+        return false;
+      const src = ctx.video.currentSrc || ctx.video.src;
+      if (!src)
+        return false;
+      return urlLooksLikeMp4(src);
+    }
+    async run(ctx, onUpdate) {
+      const video = ctx.video;
+      const src = video.currentSrc || video.src;
+      if (!src)
+        return;
+      const head = await this._head(src);
+      if (this.cancelled)
+        return;
+      if (!head || !head.acceptRanges || !head.contentLength || !head.isMp4) {
+        if (this.getSettings().debug)
+          this.log("log", "prefetch_audio: source not eligible", head);
+        return;
+      }
+      const introBlob = await this._fetchRange(src, 0, Math.min(MAX_INTRO_BYTES - 1, head.contentLength - 1));
+      if (this.cancelled || !introBlob)
+        return;
+      const introResult = await this._analyseSegment(introBlob, "intro");
+      if (this.cancelled)
+        return;
+      let creditsResult = null;
+      if (head.contentLength > MAX_INTRO_BYTES + MAX_CREDITS_BYTES) {
+        const tailStart = Math.max(0, head.contentLength - MAX_CREDITS_BYTES);
+        const tailBlob = await this._fetchRange(src, tailStart, head.contentLength - 1);
+        if (this.cancelled)
+          return;
+        if (tailBlob)
+          creditsResult = await this._analyseSegment(tailBlob, "credits", { tailStart, totalBytes: head.contentLength, duration: video.duration });
+        if (this.cancelled)
+          return;
+      }
+      const ranges = { intro: [], credits: [] };
+      if (introResult && introResult.intro)
+        ranges.intro.push(introResult.intro);
+      if (creditsResult && creditsResult.credits)
+        ranges.credits.push(creditsResult.credits);
+      if (!ranges.intro.length && !ranges.credits.length) {
+        if (this.getSettings().debug)
+          this.log("log", "prefetch_audio: no segments found in prefetch windows.");
+        return;
+      }
+      if (this.getSettings().debug)
+        this.log("log", "prefetch_audio: segments found", ranges);
+      onUpdate(ranges, { confidence: "medium", source: "prefetch_audio" });
+    }
+    cancel() {
+      super.cancel();
+      if (this._abort) {
+        try {
+          this._abort.abort();
+        } catch (e) {
+        }
+        this._abort = null;
+      }
+    }
+    async _head(url) {
+      let response;
+      try {
+        response = await fetchWithTimeout2(url, { method: "HEAD", mode: "cors", credentials: "omit" }, HEAD_TIMEOUT_MS);
+      } catch (e) {
+        this.log("warn", "prefetch_audio: HEAD failed", e && e.message ? e.message : e);
+        return null;
+      }
+      if (!response || !response.ok)
+        return null;
+      const accept = (response.headers.get("accept-ranges") || "").toLowerCase();
+      const ct = response.headers.get("content-type") || "";
+      const len = Number(response.headers.get("content-length"));
+      return {
+        acceptRanges: accept === "bytes",
+        contentLength: Number.isFinite(len) && len > 0 ? len : 0,
+        contentType: ct,
+        isMp4: isMp4ContentType(ct) || urlLooksLikeMp4(url)
+      };
+    }
+    async _fetchRange(url, start, end) {
+      const headers = { Range: `bytes=${start}-${end}` };
+      let response;
+      try {
+        response = await fetchWithTimeout2(url, { method: "GET", headers, mode: "cors", credentials: "omit" }, FETCH_TIMEOUT_MS2);
+      } catch (e) {
+        this.log("warn", "prefetch_audio: range fetch failed", e && e.message ? e.message : e);
+        return null;
+      }
+      if (!response.ok && response.status !== 206) {
+        this.log("warn", `prefetch_audio: range ${start}-${end} HTTP ${response.status}`);
+        return null;
+      }
+      try {
+        return await response.arrayBuffer();
+      } catch (e) {
+        return null;
+      }
+    }
+    async _analyseSegment(arrayBuffer, kind, tailMeta) {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      let audioCtx;
+      try {
+        audioCtx = new AudioCtx({ latencyHint: "interactive" });
+      } catch (e) {
+        return null;
+      }
+      let audioBuffer;
+      try {
+        audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+      } catch (e) {
+        try {
+          audioCtx.close();
+        } catch (err) {
+        }
+        if (this.getSettings().debug)
+          this.log("log", `prefetch_audio: decode failed for ${kind}`, e && e.message ? e.message : e);
+        return null;
+      }
+      const channelData = audioBuffer.getChannelData(0);
+      const sampleRate = audioBuffer.sampleRate;
+      const windowSize = Math.max(1, Math.floor(RMS_WINDOW_SEC * sampleRate));
+      const windows = [];
+      for (let offset = 0; offset + windowSize <= channelData.length; offset += windowSize) {
+        let sumSq = 0;
+        for (let i = 0; i < windowSize; i += 1) {
+          const sample = channelData[offset + i];
+          sumSq += sample * sample;
+        }
+        const rms = Math.sqrt(sumSq / windowSize);
+        const t2 = offset / sampleRate;
+        windows.push({ start: t2, end: t2 + RMS_WINDOW_SEC, rms });
+      }
+      try {
+        audioCtx.close();
+      } catch (e) {
+      }
+      if (!windows.length)
+        return null;
+      const baselineSize = Math.min(BASELINE_WINDOWS, windows.length);
+      const baseline = windows.slice(0, baselineSize).map((w) => w.rms);
+      const rawMedian = computeMedian(baseline);
+      const median = Math.max(rawMedian, MIN_BASELINE_RMS);
+      let mad = computeMedian(baseline.map((v) => Math.abs(v - median)));
+      if (!Number.isFinite(mad) || mad < 1e-6)
+        mad = 1e-5;
+      const threshold = Math.max(Z_THRESHOLD * mad * 1.4826, MIN_THRESHOLD);
+      const flagged = [];
+      for (let i = 0; i < windows.length; i += 1) {
+        const w = windows[i];
+        const outlier = w.rms - median > threshold;
+        const aboveFloor = w.rms >= ABS_RMS_FLOOR;
+        if (outlier && aboveFloor)
+          flagged.push({ start: w.start, end: w.end });
+      }
+      const merged = mergeSegments(flagged, MERGE_GAP_SEC);
+      const filtered = merged.filter((seg) => seg.end - seg.start >= MIN_INTRO_SEG_SEC);
+      if (!filtered.length)
+        return null;
+      const result = {};
+      if (kind === "intro") {
+        filtered.sort((a, b) => a.start - b.start);
+        result.intro = filtered[0];
+      } else if (kind === "credits" && tailMeta && Number.isFinite(tailMeta.duration)) {
+        filtered.sort((a, b) => a.start - b.start);
+        const last = filtered[filtered.length - 1];
+        const proportion = tailMeta.tailStart / tailMeta.totalBytes;
+        const tailDurationStart = tailMeta.duration * proportion;
+        result.credits = {
+          start: tailDurationStart + last.start,
+          end: tailMeta.duration
+        };
+      }
+      return result;
+    }
+  };
+
   // src/playback/PlaybackController.js
   var PlaybackController = class {
     constructor({ resolver, getSettings, onSegmentEnter, onSegmentLeave, log }) {
@@ -2208,6 +2957,15 @@
       position: relative;
       overflow: hidden;
     }
+    .autoskip-prompt__skip-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35em;
+    }
+    .autoskip-prompt__confidence-mark {
+      font-size: 0.85em;
+      opacity: 0.7;
+    }
     .autoskip-prompt__progress {
       position: absolute;
       left: 0;
@@ -2220,6 +2978,12 @@
       will-change: transform;
       pointer-events: none;
       border-radius: 0 0 1em 1em;
+    }
+    .autoskip-prompt--confidence-low .autoskip-prompt__progress {
+      background: rgba(255, 138, 0, 0.55);
+    }
+    .autoskip-prompt--confidence-medium .autoskip-prompt__progress {
+      background: rgba(255, 138, 0, 0.85);
     }
     .autoskip-prompt--standalone {
       position: fixed;
@@ -2531,15 +3295,22 @@
     cancel.appendChild(cancelLabel);
     const skip = document.createElement("div");
     skip.className = "simple-button selector autoskip-prompt__skip";
+    const labelWrap = document.createElement("span");
+    labelWrap.className = "autoskip-prompt__skip-label";
     const skipLabel = document.createElement("span");
     skipLabel.textContent = t("autoskip_skip");
-    skip.appendChild(skipLabel);
+    labelWrap.appendChild(skipLabel);
+    const confidenceMark = document.createElement("span");
+    confidenceMark.className = "autoskip-prompt__confidence-mark";
+    confidenceMark.style.display = "none";
+    labelWrap.appendChild(confidenceMark);
+    skip.appendChild(labelWrap);
     const progress = document.createElement("div");
     progress.className = "autoskip-prompt__progress";
     skip.appendChild(progress);
     root.appendChild(cancel);
     root.appendChild(skip);
-    return { root, cancel, skip, progress };
+    return { root, cancel, skip, progress, confidenceMark };
   }
   var SkipPrompt = class {
     constructor({ log, durationMs = 5e3, onSkip, onCancel } = {}) {
@@ -2622,10 +3393,28 @@
       this.parts.skip.addEventListener("click", () => this._handleSkip());
       return this.parts;
     }
-    show(segment) {
+    show(segment, options) {
       const parts = this._ensure();
       this._activeSegment = segment;
+      const opts = options || {};
+      const confidence = opts.confidence || "high";
+      this._activeConfidence = confidence;
+      const autoSkipAllowed = opts.autoSkip !== false;
       parts.root.classList.add("is-visible");
+      parts.root.classList.remove("autoskip-prompt--confidence-low", "autoskip-prompt--confidence-medium", "autoskip-prompt--confidence-high");
+      parts.root.classList.add(`autoskip-prompt--confidence-${confidence}`);
+      if (parts.confidenceMark) {
+        if (confidence === "low") {
+          parts.confidenceMark.style.display = "";
+          parts.confidenceMark.textContent = "?";
+        } else if (confidence === "medium") {
+          parts.confidenceMark.style.display = "";
+          parts.confidenceMark.textContent = "~";
+        } else {
+          parts.confidenceMark.style.display = "none";
+          parts.confidenceMark.textContent = "";
+        }
+      }
       parts.cancel.classList.remove("focus");
       parts.skip.classList.add("focus");
       parts.progress.style.transform = "scaleX(0)";
@@ -2641,11 +3430,19 @@
         this.controller.takeover(parts.skip);
       }
       this._visible = true;
-      this._restartTimer();
+      if (autoSkipAllowed && confidence !== "low")
+        this._restartTimer();
+      else
+        this._cancelTimer();
+    }
+    _cancelTimer() {
+      if (this.timer) {
+        this.timer.cancel();
+        this.timer = null;
+      }
     }
     _restartTimer() {
-      if (this.timer)
-        this.timer.cancel();
+      this._cancelTimer();
       if (!this.parts)
         return;
       const { progress } = this.parts;
@@ -2723,9 +3520,19 @@
     .player-panel__timeline-segment--autoskip {
       background-color: rgba(255, 138, 0, 0.55);
       pointer-events: none;
+      transition: background-color 0.2s linear;
     }
     .player-panel__timeline-segment--autoskip-credits {
       background-color: rgba(255, 138, 0, 0.45);
+    }
+    .player-panel__timeline-segment--autoskip-low {
+      background-color: rgba(255, 138, 0, 0.28);
+    }
+    .player-panel__timeline-segment--autoskip-medium {
+      background-color: rgba(255, 138, 0, 0.45);
+    }
+    .player-panel__timeline-segment--autoskip-high {
+      background-color: rgba(255, 138, 0, 0.65);
     }
   `;
     document.head.appendChild(style);
@@ -2762,13 +3569,14 @@
       this.ranges = { intro: [], credits: [] };
       this._lastSnapshot = null;
     }
-    setRanges(ranges, duration) {
+    setRanges(ranges, duration, confidence) {
       this.ranges = {
         intro: Array.isArray(ranges && ranges.intro) ? ranges.intro : [],
         credits: Array.isArray(ranges && ranges.credits) ? ranges.credits : []
       };
       if (Number.isFinite(duration) && duration > 0)
         this.duration = duration;
+      this.confidence = confidence || { intro: "high", credits: "high" };
       this._render();
     }
     _mount() {
@@ -2814,7 +3622,7 @@
       }
     }
     _snapshot() {
-      return JSON.stringify({ ranges: this.ranges, duration: this.duration });
+      return JSON.stringify({ ranges: this.ranges, duration: this.duration, confidence: this.confidence });
     }
     _render() {
       if (!this._mount())
@@ -2835,6 +3643,7 @@
       this.clear();
       ["intro", "credits"].forEach((kind) => {
         const ranges = this.ranges[kind] || [];
+        const confidence = this.confidence && this.confidence[kind] || "high";
         ranges.forEach((range) => {
           const start = Math.max(0, Number(range.start));
           const end = Math.max(start, Number(range.end));
@@ -2846,7 +3655,7 @@
           if (width <= 0)
             return;
           const seg = document.createElement("div");
-          seg.className = `player-panel__timeline-segment player-panel__timeline-segment--autoskip player-panel__timeline-segment--autoskip-${kind}`;
+          seg.className = `player-panel__timeline-segment player-panel__timeline-segment--autoskip player-panel__timeline-segment--autoskip-${kind} player-panel__timeline-segment--autoskip-${confidence}`;
           seg.style.left = `${left}%`;
           seg.style.width = `${width}%`;
           this.timeline.appendChild(seg);
@@ -2868,7 +3677,7 @@
   // src/core/AutoSkipPlugin.js
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "3.0.0";
+      this.version = "3.1.0";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";
@@ -2905,6 +3714,18 @@
         log: this.log,
         getSettings: () => this.settings,
         getContentIds: () => getContentIds()
+      });
+      this.subtitleProvider = new SubtitleProvider({
+        log: this.log,
+        getSettings: () => this.settings
+      });
+      this.visualProvider = new VisualProvider({
+        log: this.log,
+        getSettings: () => this.settings
+      });
+      this.prefetchAudioProvider = new PrefetchAudioProvider({
+        log: this.log,
+        getSettings: () => this.settings
       });
       this.visibilityGuard = new VisibilityGuard({
         log: this.log,
@@ -3058,13 +3879,14 @@
       this._runProvider(this.chaptersProvider);
       this._runProvider(this.aniSkipProvider);
       this._runProvider(this.theIntroDbProvider);
+      this._runProvider(this.subtitleProvider);
       this.playback.attach(this.video);
       this.skipPrompt.attachToVideo(this.video);
       this.timelineMarkers.attach(this.video);
       this._refreshTimelineMarkers();
-      this._maybeRunAudioProvider();
+      this._maybeRunFallbackProviders();
     }
-    _maybeRunAudioProvider() {
+    _maybeRunFallbackProviders() {
       setTimeout(() => {
         if (!this.video)
           return;
@@ -3072,11 +3894,19 @@
         const creditsHigh = this.resolver.hasHighConfidence("credits");
         if (introHigh && creditsHigh) {
           if (this.settings.debug)
-            this.log("log", "audio provider skipped — both segments resolved by high-confidence sources.");
+            this.log("log", "fallback providers skipped — both segments resolved by high-confidence sources.");
           return;
         }
-        this._runProvider(this.audioProvider);
-      }, 800);
+        this._runProvider(this.prefetchAudioProvider);
+        this._runProvider(this.visualProvider);
+        setTimeout(() => {
+          if (!this.video)
+            return;
+          if (this.resolver.hasHighConfidence("intro") && this.resolver.hasHighConfidence("credits"))
+            return;
+          this._runProvider(this.audioProvider);
+        }, 4e3);
+      }, 1200);
     }
     onPlayerStop() {
       if (this.video && this._bindedOnLoadedMeta) {
@@ -3094,14 +3924,18 @@
       this.playback.detach();
       this.audioProvider.cancel();
       this.audioProvider.reset();
-      if (this.theIntroDbProvider) {
-        this.theIntroDbProvider.cancel();
-        this.theIntroDbProvider.reset();
-      }
-      if (this.aniSkipProvider) {
-        this.aniSkipProvider.cancel();
-        this.aniSkipProvider.reset();
-      }
+      [this.theIntroDbProvider, this.aniSkipProvider, this.subtitleProvider, this.visualProvider, this.prefetchAudioProvider].forEach((provider) => {
+        if (!provider)
+          return;
+        try {
+          provider.cancel();
+        } catch (e) {
+        }
+        try {
+          provider.reset();
+        } catch (e) {
+        }
+      });
       this.visibilityGuard.detach();
       this.timelineMarkers.detach();
       this._flushPendingCacheSave();
@@ -3165,14 +3999,19 @@
       if (!this.video)
         return;
       const duration = Number.isFinite(this.video.duration) ? this.video.duration : 0;
-      this.timelineMarkers.setRanges(this.resolver.getRanges(), duration);
+      const confidence = {
+        intro: this.resolver.confidenceFor("intro"),
+        credits: this.resolver.confidenceFor("credits")
+      };
+      this.timelineMarkers.setRanges(this.resolver.getRanges(), duration, confidence);
     }
     _handleSegmentEnter(segment, range, isSame) {
       if (!isSame || !this.skipPrompt.isVisible()) {
-        this.skipPrompt.show(segment);
+        const confidence = this.resolver.confidenceFor(segment);
+        this.skipPrompt.show(segment, { confidence, autoSkip: confidence !== "low" });
         const t2 = this.video && Number.isFinite(this.video.currentTime) ? this.video.currentTime.toFixed(2) : "n/a";
         if (this.settings.debug) {
-          this.log("log", `segment detected -> ${segment} at ${t2}s`, {
+          this.log("log", `segment detected -> ${segment} at ${t2}s (confidence: ${confidence})`, {
             range,
             duration: this.video ? this.video.duration : void 0,
             sources: this.resolver.getSources()

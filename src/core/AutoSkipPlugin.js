@@ -13,6 +13,9 @@ import { ChaptersProvider } from '../segments/providers/ChaptersProvider.js';
 import { AudioProvider } from '../segments/providers/AudioProvider.js';
 import { AniSkipProvider } from '../segments/providers/AniSkipProvider.js';
 import { TheIntroDBProvider } from '../segments/providers/TheIntroDBProvider.js';
+import { SubtitleProvider } from '../segments/providers/SubtitleProvider.js';
+import { VisualProvider } from '../segments/providers/VisualProvider.js';
+import { PrefetchAudioProvider } from '../segments/providers/PrefetchAudioProvider.js';
 import { PlaybackController } from '../playback/PlaybackController.js';
 import { VisibilityGuard } from '../playback/visibilityGuard.js';
 import { hasNativeSkip } from '../playback/nativeSkipDetect.js';
@@ -22,7 +25,7 @@ import { t as translate, registerTranslations } from '../util/i18n.js';
 
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '3.0.0';
+    this.version = '3.1.0';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';
@@ -63,6 +66,18 @@ export class AutoSkipPlugin {
       log: this.log,
       getSettings: () => this.settings,
       getContentIds: () => getContentIds()
+    });
+    this.subtitleProvider = new SubtitleProvider({
+      log: this.log,
+      getSettings: () => this.settings
+    });
+    this.visualProvider = new VisualProvider({
+      log: this.log,
+      getSettings: () => this.settings
+    });
+    this.prefetchAudioProvider = new PrefetchAudioProvider({
+      log: this.log,
+      getSettings: () => this.settings
     });
 
     this.visibilityGuard = new VisibilityGuard({
@@ -226,25 +241,35 @@ export class AutoSkipPlugin {
     this._runProvider(this.chaptersProvider);
     this._runProvider(this.aniSkipProvider);
     this._runProvider(this.theIntroDbProvider);
+    this._runProvider(this.subtitleProvider);
 
     this.playback.attach(this.video);
     this.skipPrompt.attachToVideo(this.video);
     this.timelineMarkers.attach(this.video);
     this._refreshTimelineMarkers();
-    this._maybeRunAudioProvider();
+    this._maybeRunFallbackProviders();
   }
 
-  _maybeRunAudioProvider() {
+  _maybeRunFallbackProviders() {
     setTimeout(() => {
       if (!this.video) return;
       const introHigh = this.resolver.hasHighConfidence('intro');
       const creditsHigh = this.resolver.hasHighConfidence('credits');
+
       if (introHigh && creditsHigh) {
-        if (this.settings.debug) this.log('log', 'audio provider skipped — both segments resolved by high-confidence sources.');
+        if (this.settings.debug) this.log('log', 'fallback providers skipped — both segments resolved by high-confidence sources.');
         return;
       }
-      this._runProvider(this.audioProvider);
-    }, 800);
+
+      this._runProvider(this.prefetchAudioProvider);
+      this._runProvider(this.visualProvider);
+
+      setTimeout(() => {
+        if (!this.video) return;
+        if (this.resolver.hasHighConfidence('intro') && this.resolver.hasHighConfidence('credits')) return;
+        this._runProvider(this.audioProvider);
+      }, 4000);
+    }, 1200);
   }
 
   onPlayerStop() {
@@ -258,14 +283,11 @@ export class AutoSkipPlugin {
     this.playback.detach();
     this.audioProvider.cancel();
     this.audioProvider.reset();
-    if (this.theIntroDbProvider) {
-      this.theIntroDbProvider.cancel();
-      this.theIntroDbProvider.reset();
-    }
-    if (this.aniSkipProvider) {
-      this.aniSkipProvider.cancel();
-      this.aniSkipProvider.reset();
-    }
+    [this.theIntroDbProvider, this.aniSkipProvider, this.subtitleProvider, this.visualProvider, this.prefetchAudioProvider].forEach((provider) => {
+      if (!provider) return;
+      try { provider.cancel(); } catch (e) { /* noop */ }
+      try { provider.reset(); } catch (e) { /* noop */ }
+    });
     this.visibilityGuard.detach();
     this.timelineMarkers.detach();
     this._flushPendingCacheSave();
@@ -325,15 +347,20 @@ export class AutoSkipPlugin {
     if (!this.timelineMarkers) return;
     if (!this.video) return;
     const duration = Number.isFinite(this.video.duration) ? this.video.duration : 0;
-    this.timelineMarkers.setRanges(this.resolver.getRanges(), duration);
+    const confidence = {
+      intro: this.resolver.confidenceFor('intro'),
+      credits: this.resolver.confidenceFor('credits')
+    };
+    this.timelineMarkers.setRanges(this.resolver.getRanges(), duration, confidence);
   }
 
   _handleSegmentEnter(segment, range, isSame) {
     if (!isSame || !this.skipPrompt.isVisible()) {
-      this.skipPrompt.show(segment);
+      const confidence = this.resolver.confidenceFor(segment);
+      this.skipPrompt.show(segment, { confidence, autoSkip: confidence !== 'low' });
       const t = this.video && Number.isFinite(this.video.currentTime) ? this.video.currentTime.toFixed(2) : 'n/a';
       if (this.settings.debug) {
-        this.log('log', `segment detected -> ${segment} at ${t}s`, {
+        this.log('log', `segment detected -> ${segment} at ${t}s (confidence: ${confidence})`, {
           range,
           duration: this.video ? this.video.duration : undefined,
           sources: this.resolver.getSources()

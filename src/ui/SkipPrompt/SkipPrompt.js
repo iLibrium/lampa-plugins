@@ -26,9 +26,16 @@ function buildElement() {
 
   const skip = document.createElement('div');
   skip.className = 'simple-button selector autoskip-prompt__skip';
+  const labelWrap = document.createElement('span');
+  labelWrap.className = 'autoskip-prompt__skip-label';
   const skipLabel = document.createElement('span');
   skipLabel.textContent = translate('autoskip_skip');
-  skip.appendChild(skipLabel);
+  labelWrap.appendChild(skipLabel);
+  const confidenceMark = document.createElement('span');
+  confidenceMark.className = 'autoskip-prompt__confidence-mark';
+  confidenceMark.style.display = 'none';
+  labelWrap.appendChild(confidenceMark);
+  skip.appendChild(labelWrap);
 
   const progress = document.createElement('div');
   progress.className = 'autoskip-prompt__progress';
@@ -37,7 +44,7 @@ function buildElement() {
   root.appendChild(cancel);
   root.appendChild(skip);
 
-  return { root, cancel, skip, progress };
+  return { root, cancel, skip, progress, confidenceMark };
 }
 
 export class SkipPrompt {
@@ -106,10 +113,30 @@ export class SkipPrompt {
     return this.parts;
   }
 
-  show(segment) {
+  show(segment, options) {
     const parts = this._ensure();
     this._activeSegment = segment;
+    const opts = options || {};
+    const confidence = opts.confidence || 'high';
+    this._activeConfidence = confidence;
+    const autoSkipAllowed = opts.autoSkip !== false;
+
     parts.root.classList.add('is-visible');
+    parts.root.classList.remove('autoskip-prompt--confidence-low', 'autoskip-prompt--confidence-medium', 'autoskip-prompt--confidence-high');
+    parts.root.classList.add(`autoskip-prompt--confidence-${confidence}`);
+
+    if (parts.confidenceMark) {
+      if (confidence === 'low') {
+        parts.confidenceMark.style.display = '';
+        parts.confidenceMark.textContent = '?';
+      } else if (confidence === 'medium') {
+        parts.confidenceMark.style.display = '';
+        parts.confidenceMark.textContent = '~';
+      } else {
+        parts.confidenceMark.style.display = 'none';
+        parts.confidenceMark.textContent = '';
+      }
+    }
 
     parts.cancel.classList.remove('focus');
     parts.skip.classList.add('focus');
@@ -129,11 +156,19 @@ export class SkipPrompt {
     }
     this._visible = true;
 
-    this._restartTimer();
+    if (autoSkipAllowed && confidence !== 'low') this._restartTimer();
+    else this._cancelTimer();
+  }
+
+  _cancelTimer() {
+    if (this.timer) {
+      this.timer.cancel();
+      this.timer = null;
+    }
   }
 
   _restartTimer() {
-    if (this.timer) this.timer.cancel();
+    this._cancelTimer();
     if (!this.parts) return;
     const { progress } = this.parts;
     this.timer = new ProgressTimer({
