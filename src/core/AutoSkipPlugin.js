@@ -21,7 +21,7 @@ import { t as translate, registerTranslations } from '../util/i18n.js';
 
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '2.1.3';
+    this.version = '2.1.4';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';

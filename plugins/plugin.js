@@ -1043,14 +1043,17 @@
     baselineWindows: 30,
     warmupWindows: 24,
     zThreshold: 1.4,
-    minSegmentSec: 6,
-    mergeGapSec: 1,
+    minSegmentSec: 5,
+    mergeGapSec: 3,
     introMaxFraction: 0.3,
     creditsMinFraction: 0.7,
     fftSize: 2048,
     voiceMusicMaxRatio: 0.45,
     silenceProbeWindows: 6,
-    silenceProbeRmsThreshold: 1e-6
+    silenceProbeRmsThreshold: 1e-6,
+    minBaselineRms: 0.01,
+    minThreshold: 8e-3,
+    absoluteRmsFloor: 0.04
   };
   var VOICE_BAND_LO = 200;
   var VOICE_BAND_HI = 3e3;
@@ -1340,19 +1343,21 @@
       const baselineSize = Math.min(this.config.baselineWindows, windows.length);
       const baselineSlice = windows.slice(-baselineSize);
       const values = baselineSlice.map((w) => w.rms);
-      const median = computeMedian(values);
+      const rawMedian = computeMedian(values);
+      const median = Math.max(rawMedian, this.config.minBaselineRms);
       let mad = computeMedian(values.map((v) => Math.abs(v - median)));
       if (!Number.isFinite(mad) || mad < 1e-7) {
         const variance = values.reduce((s, v) => s + (v - median) * (v - median), 0) / Math.max(values.length, 1);
         mad = Math.sqrt(Math.max(variance, 0)) / 1.4826 || 1e-6;
       }
-      const thresh = this.config.zThreshold * mad * 1.4826;
+      const thresh = Math.max(this.config.zThreshold * mad * 1.4826, this.config.minThreshold);
       const flagged = [];
       for (let i = 0; i < windows.length; i += 1) {
         const w = windows[i];
-        const rmsOutlier = Math.abs(w.rms - median) > thresh;
-        const voiceLow = w.voiceRatio !== null && w.voiceRatio < this.config.voiceMusicMaxRatio;
-        if (rmsOutlier && voiceLow)
+        const rmsOutlier = w.rms - median > thresh;
+        const aboveFloor = w.rms >= this.config.absoluteRmsFloor;
+        const voiceLow = w.voiceRatio === null || w.voiceRatio < this.config.voiceMusicMaxRatio;
+        if (rmsOutlier && aboveFloor && voiceLow)
           flagged.push({ start: w.start, end: w.end });
       }
       const merged = mergeSegments(flagged, this.config.mergeGapSec);
@@ -2534,7 +2539,7 @@
   // src/core/AutoSkipPlugin.js
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "2.1.3";
+      this.version = "2.1.4";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";
