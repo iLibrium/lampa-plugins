@@ -25,7 +25,7 @@ import { t as translate, registerTranslations } from '../util/i18n.js';
 
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '3.1.0';
+    this.version = '3.1.1';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';
@@ -269,7 +269,21 @@ export class AutoSkipPlugin {
         if (this.resolver.hasHighConfidence('intro') && this.resolver.hasHighConfidence('credits')) return;
         this._runProvider(this.audioProvider);
       }, 4000);
+
+      this._scheduleEmptyResultNotice();
     }, 1200);
+  }
+
+  _scheduleEmptyResultNotice() {
+    if (this._emptyResultTimer) clearTimeout(this._emptyResultTimer);
+    this._emptyResultTimer = setTimeout(() => {
+      if (!this.video) return;
+      const ranges = this.resolver.getRanges();
+      const hasAny = (ranges.intro && ranges.intro.length) || (ranges.credits && ranges.credits.length);
+      if (hasAny) return;
+      if (!this.settings.debug) return;
+      this.log('log', 'AutoSkip: no segments found by any provider — content not covered.');
+    }, 90000);
   }
 
   onPlayerStop() {
@@ -288,6 +302,10 @@ export class AutoSkipPlugin {
       try { provider.cancel(); } catch (e) { /* noop */ }
       try { provider.reset(); } catch (e) { /* noop */ }
     });
+    if (this._emptyResultTimer) {
+      try { clearTimeout(this._emptyResultTimer); } catch (e) { /* noop */ }
+      this._emptyResultTimer = null;
+    }
     this.visibilityGuard.detach();
     this.timelineMarkers.detach();
     this._flushPendingCacheSave();
@@ -304,7 +322,11 @@ export class AutoSkipPlugin {
   _runProvider(provider) {
     if (!provider) return;
     try {
-      if (!provider.isApplicable({ video: this.video, capabilities: this.capabilities })) return;
+      if (!provider.isApplicable({ video: this.video, capabilities: this.capabilities })) {
+        if (this.settings.debug) this.log('log', `provider ${provider.name} skipped (not applicable).`);
+        return;
+      }
+      if (this.settings.debug) this.log('log', `provider ${provider.name} starting.`);
       const result = provider.run(
         { video: this.video, capabilities: this.capabilities },
         (ranges, meta) => this._onProviderUpdate(provider.name, ranges, meta)

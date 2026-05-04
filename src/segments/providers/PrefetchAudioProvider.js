@@ -50,10 +50,13 @@ export class PrefetchAudioProvider extends ProviderBase {
     if (typeof fetch !== 'function') return false;
     const AudioCtx = (typeof window !== 'undefined') && (window.AudioContext || window.webkitAudioContext);
     if (!AudioCtx) return false;
-    if (typeof AudioCtx.prototype.decodeAudioData !== 'function' && typeof (new AudioCtx()).decodeAudioData !== 'function') return false;
     const src = ctx.video.currentSrc || ctx.video.src;
     if (!src) return false;
-    return urlLooksLikeMp4(src);
+    if (!urlLooksLikeMp4(src)) {
+      if (this.getSettings().debug) this.log('log', `prefetch_audio: src is not mp4-like (${src.slice(0, 80)}...), skipping.`);
+      return false;
+    }
+    return true;
   }
 
   async run(ctx, onUpdate) {

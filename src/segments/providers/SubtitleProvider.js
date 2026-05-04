@@ -95,18 +95,32 @@ export class SubtitleProvider extends ProviderBase {
 
   async run(ctx, onUpdate) {
     const video = ctx.video;
+    const debug = !!this.getSettings().debug;
     const cues = await this._collectCues(video);
     if (this.cancelled) return;
-    if (!cues || !cues.length) return;
+    if (!cues || !cues.length) {
+      if (debug) {
+        const reason = (video && video.customSubs && video.customSubs.length)
+          ? 'customSubs URL not fetchable / not parsed'
+          : (video && video.textTracks && video.textTracks.length)
+            ? 'textTracks empty (no cues)'
+            : 'no subtitle tracks attached';
+        this.log('log', `subtitle provider: no cues collected — ${reason}.`);
+      }
+      return;
+    }
 
     const duration = Number.isFinite(video.duration) ? video.duration : 0;
     if (duration <= 0) return;
 
     const ranges = this._analyse(cues, duration);
-    if (!ranges.intro.length && !ranges.credits.length) return;
+    if (!ranges.intro.length && !ranges.credits.length) {
+      if (debug) this.log('log', `subtitle provider: ${cues.length} cues collected, no intro/credits markers matched.`);
+      return;
+    }
 
-    if (this.getSettings().debug) {
-      this.log('log', `subtitle provider found ${cues.length} cues`, { intro: ranges.intro, credits: ranges.credits });
+    if (debug) {
+      this.log('log', `subtitle provider: ${cues.length} cues, segments`, { intro: ranges.intro, credits: ranges.credits });
     }
     onUpdate(ranges, { confidence: 'medium', source: 'subtitle', cues: cues.length });
   }

@@ -2152,19 +2152,28 @@
     }
     async run(ctx, onUpdate) {
       const video = ctx.video;
+      const debug = !!this.getSettings().debug;
       const cues = await this._collectCues(video);
       if (this.cancelled)
         return;
-      if (!cues || !cues.length)
+      if (!cues || !cues.length) {
+        if (debug) {
+          const reason = video && video.customSubs && video.customSubs.length ? "customSubs URL not fetchable / not parsed" : video && video.textTracks && video.textTracks.length ? "textTracks empty (no cues)" : "no subtitle tracks attached";
+          this.log("log", `subtitle provider: no cues collected — ${reason}.`);
+        }
         return;
+      }
       const duration = Number.isFinite(video.duration) ? video.duration : 0;
       if (duration <= 0)
         return;
       const ranges = this._analyse(cues, duration);
-      if (!ranges.intro.length && !ranges.credits.length)
+      if (!ranges.intro.length && !ranges.credits.length) {
+        if (debug)
+          this.log("log", `subtitle provider: ${cues.length} cues collected, no intro/credits markers matched.`);
         return;
-      if (this.getSettings().debug) {
-        this.log("log", `subtitle provider found ${cues.length} cues`, { intro: ranges.intro, credits: ranges.credits });
+      }
+      if (debug) {
+        this.log("log", `subtitle provider: ${cues.length} cues, segments`, { intro: ranges.intro, credits: ranges.credits });
       }
       onUpdate(ranges, { confidence: "medium", source: "subtitle", cues: cues.length });
     }
@@ -2539,12 +2548,15 @@
       const AudioCtx = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
       if (!AudioCtx)
         return false;
-      if (typeof AudioCtx.prototype.decodeAudioData !== "function" && typeof new AudioCtx().decodeAudioData !== "function")
-        return false;
       const src = ctx.video.currentSrc || ctx.video.src;
       if (!src)
         return false;
-      return urlLooksLikeMp4(src);
+      if (!urlLooksLikeMp4(src)) {
+        if (this.getSettings().debug)
+          this.log("log", `prefetch_audio: src is not mp4-like (${src.slice(0, 80)}...), skipping.`);
+        return false;
+      }
+      return true;
     }
     async run(ctx, onUpdate) {
       const video = ctx.video;
@@ -3677,7 +3689,7 @@
   // src/core/AutoSkipPlugin.js
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "3.1.0";
+      this.version = "3.1.1";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";
@@ -3906,7 +3918,23 @@
             return;
           this._runProvider(this.audioProvider);
         }, 4e3);
+        this._scheduleEmptyResultNotice();
       }, 1200);
+    }
+    _scheduleEmptyResultNotice() {
+      if (this._emptyResultTimer)
+        clearTimeout(this._emptyResultTimer);
+      this._emptyResultTimer = setTimeout(() => {
+        if (!this.video)
+          return;
+        const ranges = this.resolver.getRanges();
+        const hasAny = ranges.intro && ranges.intro.length || ranges.credits && ranges.credits.length;
+        if (hasAny)
+          return;
+        if (!this.settings.debug)
+          return;
+        this.log("log", "AutoSkip: no segments found by any provider — content not covered.");
+      }, 9e4);
     }
     onPlayerStop() {
       if (this.video && this._bindedOnLoadedMeta) {
@@ -3936,6 +3964,13 @@
         } catch (e) {
         }
       });
+      if (this._emptyResultTimer) {
+        try {
+          clearTimeout(this._emptyResultTimer);
+        } catch (e) {
+        }
+        this._emptyResultTimer = null;
+      }
       this.visibilityGuard.detach();
       this.timelineMarkers.detach();
       this._flushPendingCacheSave();
@@ -3950,8 +3985,13 @@
       if (!provider)
         return;
       try {
-        if (!provider.isApplicable({ video: this.video, capabilities: this.capabilities }))
+        if (!provider.isApplicable({ video: this.video, capabilities: this.capabilities })) {
+          if (this.settings.debug)
+            this.log("log", `provider ${provider.name} skipped (not applicable).`);
           return;
+        }
+        if (this.settings.debug)
+          this.log("log", `provider ${provider.name} starting.`);
         const result = provider.run(
           { video: this.video, capabilities: this.capabilities },
           (ranges, meta) => this._onProviderUpdate(provider.name, ranges, meta)
