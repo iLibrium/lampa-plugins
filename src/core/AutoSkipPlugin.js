@@ -2,7 +2,7 @@ import { createLogger } from './logger.js';
 import { probe as probeCapabilities } from './capabilities.js';
 import { SettingsStore, SETTINGS_DEFAULTS } from '../storage/SettingsStore.js';
 import { SegmentCache } from '../storage/SegmentCache.js';
-import { getContentId } from '../segments/contentId.js';
+import { getContentId, getContentIds } from '../segments/contentId.js';
 import { followPlayer } from '../lampa/playerEvents.js';
 import { waitForLampa } from '../lampa/waitForLampa.js';
 import { isSettingsApiReady, registerSettingsComponent } from '../lampa/settingsUi.js';
@@ -12,6 +12,7 @@ import { MetadataProvider } from '../segments/providers/MetadataProvider.js';
 import { ChaptersProvider } from '../segments/providers/ChaptersProvider.js';
 import { AudioProvider } from '../segments/providers/AudioProvider.js';
 import { AniSkipProvider } from '../segments/providers/AniSkipProvider.js';
+import { TheIntroDBProvider } from '../segments/providers/TheIntroDBProvider.js';
 import { PlaybackController } from '../playback/PlaybackController.js';
 import { VisibilityGuard } from '../playback/visibilityGuard.js';
 import { hasNativeSkip } from '../playback/nativeSkipDetect.js';
@@ -21,7 +22,7 @@ import { t as translate, registerTranslations } from '../util/i18n.js';
 
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '2.1.4';
+    this.version = '3.0.0';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';
@@ -57,6 +58,11 @@ export class AutoSkipPlugin {
     this.aniSkipProvider = new AniSkipProvider({
       log: this.log,
       getSettings: () => this.settings
+    });
+    this.theIntroDbProvider = new TheIntroDBProvider({
+      log: this.log,
+      getSettings: () => this.settings,
+      getContentIds: () => getContentIds()
     });
 
     this.visibilityGuard = new VisibilityGuard({
@@ -219,12 +225,26 @@ export class AutoSkipPlugin {
     this._runProvider(this.metadataProvider);
     this._runProvider(this.chaptersProvider);
     this._runProvider(this.aniSkipProvider);
+    this._runProvider(this.theIntroDbProvider);
 
     this.playback.attach(this.video);
     this.skipPrompt.attachToVideo(this.video);
     this.timelineMarkers.attach(this.video);
     this._refreshTimelineMarkers();
-    this._runProvider(this.audioProvider);
+    this._maybeRunAudioProvider();
+  }
+
+  _maybeRunAudioProvider() {
+    setTimeout(() => {
+      if (!this.video) return;
+      const introHigh = this.resolver.hasHighConfidence('intro');
+      const creditsHigh = this.resolver.hasHighConfidence('credits');
+      if (introHigh && creditsHigh) {
+        if (this.settings.debug) this.log('log', 'audio provider skipped — both segments resolved by high-confidence sources.');
+        return;
+      }
+      this._runProvider(this.audioProvider);
+    }, 800);
   }
 
   onPlayerStop() {
@@ -238,6 +258,14 @@ export class AutoSkipPlugin {
     this.playback.detach();
     this.audioProvider.cancel();
     this.audioProvider.reset();
+    if (this.theIntroDbProvider) {
+      this.theIntroDbProvider.cancel();
+      this.theIntroDbProvider.reset();
+    }
+    if (this.aniSkipProvider) {
+      this.aniSkipProvider.cancel();
+      this.aniSkipProvider.reset();
+    }
     this.visibilityGuard.detach();
     this.timelineMarkers.detach();
     this._flushPendingCacheSave();

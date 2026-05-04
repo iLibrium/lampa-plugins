@@ -8,7 +8,8 @@ const DEFAULTS = {
   skipCredits: true,
   showNotifications: true,
   debug: false,
-  useAniSkip: true
+  useAniSkip: true,
+  useTheIntroDB: true
 };
 
 const KEY_ALIASES = {

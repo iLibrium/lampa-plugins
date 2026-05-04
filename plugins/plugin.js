@@ -88,7 +88,8 @@
     skipCredits: true,
     showNotifications: true,
     debug: false,
-    useAniSkip: true
+    useAniSkip: true,
+    useTheIntroDB: true
   };
   var KEY_ALIASES = {
     skipOpenings: "skipIntro",
@@ -409,8 +410,9 @@
     try {
       if (lampa && lampa.Activity && typeof lampa.Activity.active === "function") {
         const activity = lampa.Activity.active();
-        if (activity && activity.card)
-          return activity.card;
+        if (activity) {
+          return activity.card || activity.movie || null;
+        }
       }
     } catch (e) {
     }
@@ -418,11 +420,34 @@
   }
   function pickFirstFinite(...values) {
     for (const value of values) {
+      if (value === void 0 || value === null || value === "")
+        continue;
       const num = Number(value);
       if (Number.isFinite(num) && num >= 0)
         return num;
     }
     return null;
+  }
+  function pickFirstString(...values) {
+    for (const value of values) {
+      if (typeof value === "string" && value)
+        return value;
+      if (typeof value === "number" && Number.isFinite(value) && value !== 0)
+        return String(value);
+    }
+    return null;
+  }
+  function detectAnime(card) {
+    if (!card)
+      return false;
+    const lang = card.original_language;
+    const genres = Array.isArray(card.genre_ids) ? card.genre_ids : [];
+    const country = Array.isArray(card.origin_country) ? card.origin_country : [];
+    if (lang === "ja" && genres.indexOf(16) !== -1)
+      return true;
+    if (country.indexOf("JP") !== -1 && genres.indexOf(16) !== -1)
+      return true;
+    return false;
   }
   function roundDuration(duration, bucketSec = 30) {
     if (!Number.isFinite(duration) || duration <= 0)
@@ -438,12 +463,12 @@
       return null;
     return `${src}::${duration}`;
   }
-  function getContentId(video) {
-    if (!video)
-      return { primary: null, legacy: null };
+  function getContentIds() {
     const data = getPlayerData() || {};
     const card = data.movie || data.card || getActivityCard() || {};
-    const tmdb = card.id || card.tmdb_id || data.id || null;
+    const tmdb = pickFirstString(card.id, card.tmdb_id, data.id, data.tmdb_id);
+    const imdb = pickFirstString(card.imdb_id, data.imdb_id);
+    const kp = pickFirstString(card.kinopoisk_id, card.kp_id, data.kinopoisk_id);
     const season = pickFirstFinite(
       data.season_number,
       data.season,
@@ -458,12 +483,33 @@
       card.episode_number,
       card.episode
     );
+    return {
+      tmdb_id: tmdb,
+      imdb_id: imdb,
+      kp_id: kp,
+      season,
+      episode,
+      is_anime: detectAnime(card),
+      original_language: card.original_language || null,
+      genre_ids: Array.isArray(card.genre_ids) ? card.genre_ids.slice() : [],
+      title: card.title || card.name || data.title || data.name || null
+    };
+  }
+  function getContentId(video) {
+    if (!video)
+      return { primary: null, legacy: null };
+    const ids = getContentIds();
     const duration = roundDuration(video.duration, 30);
     const legacy = legacyKey(video);
-    if (tmdb) {
-      const s = season === null ? 0 : season;
-      const e = episode === null ? 0 : episode;
-      return { primary: `tmdb:${tmdb}:s${s}:e${e}:d${duration}`, legacy };
+    if (ids.tmdb_id) {
+      const s = ids.season === null ? 0 : ids.season;
+      const e = ids.episode === null ? 0 : ids.episode;
+      return { primary: `tmdb:${ids.tmdb_id}:s${s}:e${e}:d${duration}`, legacy };
+    }
+    if (ids.imdb_id) {
+      const s = ids.season === null ? 0 : ids.season;
+      const e = ids.episode === null ? 0 : ids.episode;
+      return { primary: `imdb:${ids.imdb_id}:s${s}:e${e}:d${duration}`, legacy };
     }
     if (legacy)
       return { primary: `src:${legacy}`, legacy };
@@ -544,6 +590,7 @@
       autoskip_setting_debug: "Debug-логи",
       autoskip_setting_disable: "Отключить плагин",
       autoskip_setting_aniskip: "Использовать AniSkip API для аниме",
+      autoskip_setting_theintrodb: "Использовать TheIntroDB для сериалов",
       autoskip_settings_version: "Версия",
       autoskip_audio_cors: "AutoSkip: аудио-детект недоступен на этом источнике (CORS)"
     },
@@ -561,6 +608,7 @@
       autoskip_setting_debug: "Debug logs",
       autoskip_setting_disable: "Disable plugin",
       autoskip_setting_aniskip: "Use AniSkip API for anime",
+      autoskip_setting_theintrodb: "Use TheIntroDB for TV shows",
       autoskip_settings_version: "Version",
       autoskip_audio_cors: "AutoSkip: audio detect unavailable on this source (CORS)"
     }
@@ -621,6 +669,7 @@
     { key: "skipIntro", label: "autoskip_setting_skip_intro" },
     { key: "skipCredits", label: "autoskip_setting_skip_credits" },
     { key: "showNotifications", label: "autoskip_setting_notifications" },
+    { key: "useTheIntroDB", label: "autoskip_setting_theintrodb" },
     { key: "useAniSkip", label: "autoskip_setting_aniskip" },
     { key: "debug", label: "autoskip_setting_debug" }
   ];
@@ -832,7 +881,16 @@
     audio: 1,
     chapters: 2,
     metadata: 3,
-    aniskip: 4
+    theintrodb: 4,
+    aniskip: 5
+  };
+  var SOURCE_CONFIDENCE = {
+    cache: "medium",
+    audio: "low",
+    chapters: "high",
+    metadata: "high",
+    theintrodb: "high",
+    aniskip: "high"
   };
   var VALIDATION_BONUS = 100;
   var VALIDATION_TOLERANCE_SEC = 2;
@@ -895,6 +953,17 @@
     }
     isValidated(kind) {
       return !!this.validated[kind];
+    }
+    confidenceFor(kind) {
+      const source = this.sources[kind];
+      if (!source)
+        return "none";
+      if (this.validated[kind])
+        return "high";
+      return SOURCE_CONFIDENCE[source] || "low";
+    }
+    hasHighConfidence(kind) {
+      return this.confidenceFor(kind) === "high";
     }
   };
 
@@ -1636,6 +1705,266 @@
         });
       }
       onUpdate(ranges, { source: "aniskip", malId, episode: card.episode });
+    }
+  };
+
+  // src/segments/providers/TheIntroDBProvider.js
+  var API_BASE2 = "https://api.theintrodb.org/v2/media";
+  var USER_AGENT = "AutoSkip Lampa Plugin";
+  var REQUEST_TIMEOUT_MS = 6e3;
+  var CACHE_KEY_PREFIX = "autoskip_tidb_";
+  var CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
+  var NEGATIVE_CACHE_TTL_MS = 24 * 60 * 60 * 1e3;
+  function getLampaStorage() {
+    if (typeof Lampa === "undefined" || !Lampa.Storage)
+      return null;
+    return Lampa.Storage;
+  }
+  function readStorageField(key) {
+    const storage = getLampaStorage();
+    if (!storage || typeof storage.field !== "function")
+      return null;
+    try {
+      const raw = storage.field(key);
+      if (raw === "" || raw === void 0 || raw === null)
+        return null;
+      if (typeof raw === "string") {
+        try {
+          return JSON.parse(raw);
+        } catch (e) {
+          return null;
+        }
+      }
+      return raw;
+    } catch (e) {
+      return null;
+    }
+  }
+  function writeStorageField(key, value) {
+    const storage = getLampaStorage();
+    if (!storage || typeof storage.set !== "function")
+      return;
+    try {
+      storage.set(key, value);
+    } catch (e) {
+    }
+  }
+  var TheIntroDBProvider = class extends ProviderBase {
+    constructor({ log, getSettings, getContentIds: getContentIds2 }) {
+      super({ name: "theintrodb", log });
+      this.getSettings = getSettings || (() => ({}));
+      this.getContentIds = getContentIds2 || (() => null);
+      this.abortController = null;
+    }
+    isApplicable() {
+      const settings = this.getSettings();
+      if (settings.useTheIntroDB === false)
+        return false;
+      if (typeof fetch !== "function")
+        return false;
+      const ids = this.getContentIds();
+      if (!ids)
+        return false;
+      return !!(ids.tmdb_id || ids.imdb_id);
+    }
+    async run(ctx, onUpdate) {
+      const ids = this.getContentIds();
+      if (!ids)
+        return;
+      const cacheKey = this._cacheKey(ids);
+      const cached = readStorageField(cacheKey);
+      if (cached && this._isFreshCache(cached)) {
+        if (cached.empty) {
+          if (this.getSettings().debug) {
+            this.log("log", "TheIntroDB cache hit (empty), skipping fetch.");
+          }
+          return;
+        }
+        if (this.cancelled)
+          return;
+        const ranges2 = this._normalizeRanges(cached.ranges);
+        if (ranges2.intro.length || ranges2.credits.length) {
+          onUpdate(ranges2, { confidence: "high", source: "theintrodb_cache" });
+        }
+        return;
+      }
+      const queryString = this._buildQuery(ids);
+      if (!queryString)
+        return;
+      const url = `${API_BASE2}?${queryString}`;
+      const settings = this.getSettings();
+      const headers = { "User-Agent": USER_AGENT };
+      if (settings.theIntroDbApiKey)
+        headers.Authorization = `Bearer ${settings.theIntroDbApiKey}`;
+      let timeoutId = null;
+      if (typeof AbortController === "function") {
+        this.abortController = new AbortController();
+        timeoutId = setTimeout(() => {
+          if (this.abortController) {
+            try {
+              this.abortController.abort();
+            } catch (e) {
+            }
+          }
+        }, REQUEST_TIMEOUT_MS);
+      }
+      const fetchOptions = {
+        method: "GET",
+        headers,
+        mode: "cors",
+        credentials: "omit"
+      };
+      if (this.abortController)
+        fetchOptions.signal = this.abortController.signal;
+      let response;
+      try {
+        response = await fetch(url, fetchOptions);
+      } catch (err) {
+        if (timeoutId)
+          clearTimeout(timeoutId);
+        if (!this.cancelled)
+          this.log("warn", "TheIntroDB fetch failed", err && err.message ? err.message : err);
+        return;
+      } finally {
+        if (timeoutId)
+          clearTimeout(timeoutId);
+      }
+      if (this.cancelled)
+        return;
+      if (response.status === 404) {
+        writeStorageField(cacheKey, { ts: Date.now(), empty: true });
+        if (settings.debug)
+          this.log("log", "TheIntroDB: not in database (404), negative cache.");
+        return;
+      }
+      if (!response.ok) {
+        this.log("warn", `TheIntroDB HTTP ${response.status}`);
+        return;
+      }
+      let json;
+      try {
+        json = await response.json();
+      } catch (e) {
+        this.log("warn", "TheIntroDB response not JSON", e);
+        return;
+      }
+      if (this.cancelled)
+        return;
+      const ranges = this._parseResponse(json);
+      if (!ranges.intro.length && !ranges.credits.length) {
+        writeStorageField(cacheKey, { ts: Date.now(), empty: true });
+        if (settings.debug)
+          this.log("log", "TheIntroDB: empty payload, negative cache.", json);
+        return;
+      }
+      writeStorageField(cacheKey, { ts: Date.now(), ranges });
+      if (settings.debug) {
+        this.log("log", "TheIntroDB segments fetched", {
+          intro: ranges.intro,
+          credits: ranges.credits,
+          query: queryString
+        });
+      }
+      onUpdate(ranges, { confidence: "high", source: "theintrodb", query: queryString });
+    }
+    cancel() {
+      super.cancel();
+      if (this.abortController) {
+        try {
+          this.abortController.abort();
+        } catch (e) {
+        }
+        this.abortController = null;
+      }
+    }
+    reset() {
+      super.reset();
+      this.abortController = null;
+    }
+    _isFreshCache(entry) {
+      if (!entry || typeof entry !== "object" || !Number.isFinite(entry.ts))
+        return false;
+      const age = Date.now() - entry.ts;
+      if (entry.empty)
+        return age < NEGATIVE_CACHE_TTL_MS;
+      return age < CACHE_TTL_MS;
+    }
+    _buildQuery(ids) {
+      const parts = [];
+      if (ids.tmdb_id)
+        parts.push(`tmdb_id=${encodeURIComponent(ids.tmdb_id)}`);
+      else if (ids.imdb_id)
+        parts.push(`imdb_id=${encodeURIComponent(ids.imdb_id)}`);
+      else
+        return null;
+      if (ids.season !== null && ids.season !== void 0)
+        parts.push(`season=${encodeURIComponent(ids.season)}`);
+      if (ids.episode !== null && ids.episode !== void 0)
+        parts.push(`episode=${encodeURIComponent(ids.episode)}`);
+      return parts.join("&");
+    }
+    _cacheKey(ids) {
+      const idPart = ids.tmdb_id ? `tmdb_${ids.tmdb_id}` : `imdb_${ids.imdb_id}`;
+      const s = ids.season === null || ids.season === void 0 ? 0 : ids.season;
+      const e = ids.episode === null || ids.episode === void 0 ? 0 : ids.episode;
+      return `${CACHE_KEY_PREFIX}${idPart}_s${s}_e${e}`;
+    }
+    _parseResponse(json) {
+      const ranges = { intro: [], credits: [] };
+      if (!json || typeof json !== "object")
+        return ranges;
+      const introList = Array.isArray(json.intro) ? json.intro : [];
+      const recapList = Array.isArray(json.recap) ? json.recap : [];
+      const creditsList = Array.isArray(json.credits) ? json.credits : [];
+      introList.forEach((seg) => {
+        const range = this._segToRange(seg);
+        if (range)
+          ranges.intro.push(range);
+      });
+      recapList.forEach((seg) => {
+        const range = this._segToRange(seg);
+        if (range)
+          ranges.intro.push(range);
+      });
+      creditsList.forEach((seg) => {
+        const range = this._segToRange(seg);
+        if (range)
+          ranges.credits.push(range);
+      });
+      return ranges;
+    }
+    _segToRange(seg) {
+      if (!seg || typeof seg !== "object")
+        return null;
+      const startMs = Number(seg.start_ms !== void 0 ? seg.start_ms : seg.startMs);
+      const endMs = Number(seg.end_ms !== void 0 ? seg.end_ms : seg.endMs);
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs))
+        return null;
+      const start = startMs / 1e3;
+      const end = endMs / 1e3;
+      if (end <= start)
+        return null;
+      return { start, end };
+    }
+    _normalizeRanges(raw) {
+      const result = { intro: [], credits: [] };
+      if (!raw || typeof raw !== "object")
+        return result;
+      if (Array.isArray(raw.intro))
+        raw.intro.forEach((r) => {
+          const start = Number(r.start);
+          const end = Number(r.end);
+          if (Number.isFinite(start) && Number.isFinite(end) && end > start)
+            result.intro.push({ start, end });
+        });
+      if (Array.isArray(raw.credits))
+        raw.credits.forEach((r) => {
+          const start = Number(r.start);
+          const end = Number(r.end);
+          if (Number.isFinite(start) && Number.isFinite(end) && end > start)
+            result.credits.push({ start, end });
+        });
+      return result;
     }
   };
 
@@ -2539,7 +2868,7 @@
   // src/core/AutoSkipPlugin.js
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "2.1.4";
+      this.version = "3.0.0";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";
@@ -2571,6 +2900,11 @@
       this.aniSkipProvider = new AniSkipProvider({
         log: this.log,
         getSettings: () => this.settings
+      });
+      this.theIntroDbProvider = new TheIntroDBProvider({
+        log: this.log,
+        getSettings: () => this.settings,
+        getContentIds: () => getContentIds()
       });
       this.visibilityGuard = new VisibilityGuard({
         log: this.log,
@@ -2723,11 +3057,26 @@
       this._runProvider(this.metadataProvider);
       this._runProvider(this.chaptersProvider);
       this._runProvider(this.aniSkipProvider);
+      this._runProvider(this.theIntroDbProvider);
       this.playback.attach(this.video);
       this.skipPrompt.attachToVideo(this.video);
       this.timelineMarkers.attach(this.video);
       this._refreshTimelineMarkers();
-      this._runProvider(this.audioProvider);
+      this._maybeRunAudioProvider();
+    }
+    _maybeRunAudioProvider() {
+      setTimeout(() => {
+        if (!this.video)
+          return;
+        const introHigh = this.resolver.hasHighConfidence("intro");
+        const creditsHigh = this.resolver.hasHighConfidence("credits");
+        if (introHigh && creditsHigh) {
+          if (this.settings.debug)
+            this.log("log", "audio provider skipped — both segments resolved by high-confidence sources.");
+          return;
+        }
+        this._runProvider(this.audioProvider);
+      }, 800);
     }
     onPlayerStop() {
       if (this.video && this._bindedOnLoadedMeta) {
@@ -2745,6 +3094,14 @@
       this.playback.detach();
       this.audioProvider.cancel();
       this.audioProvider.reset();
+      if (this.theIntroDbProvider) {
+        this.theIntroDbProvider.cancel();
+        this.theIntroDbProvider.reset();
+      }
+      if (this.aniSkipProvider) {
+        this.aniSkipProvider.cancel();
+        this.aniSkipProvider.reset();
+      }
       this.visibilityGuard.detach();
       this.timelineMarkers.detach();
       this._flushPendingCacheSave();

@@ -5,7 +5,17 @@ const SOURCE_PRIORITY = {
   audio: 1,
   chapters: 2,
   metadata: 3,
-  aniskip: 4
+  theintrodb: 4,
+  aniskip: 5
+};
+
+const SOURCE_CONFIDENCE = {
+  cache: 'medium',
+  audio: 'low',
+  chapters: 'high',
+  metadata: 'high',
+  theintrodb: 'high',
+  aniskip: 'high'
 };
 
 const VALIDATION_BONUS = 100;
@@ -81,10 +91,21 @@ export class SegmentResolver {
   isValidated(kind) {
     return !!this.validated[kind];
   }
+
+  confidenceFor(kind) {
+    const source = this.sources[kind];
+    if (!source) return 'none';
+    if (this.validated[kind]) return 'high';
+    return SOURCE_CONFIDENCE[source] || 'low';
+  }
+
+  hasHighConfidence(kind) {
+    return this.confidenceFor(kind) === 'high';
+  }
 }
 
 export function normalizeForResolver(raw, duration) {
   return normalizeRanges(raw, duration);
 }
 
-export { SOURCE_PRIORITY };
+export { SOURCE_PRIORITY, SOURCE_CONFIDENCE };

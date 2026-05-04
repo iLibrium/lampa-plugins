@@ -9,6 +9,7 @@ const PARAM_DEFINITIONS = [
   { key: 'skipIntro', label: 'autoskip_setting_skip_intro' },
   { key: 'skipCredits', label: 'autoskip_setting_skip_credits' },
   { key: 'showNotifications', label: 'autoskip_setting_notifications' },
+  { key: 'useTheIntroDB', label: 'autoskip_setting_theintrodb' },
   { key: 'useAniSkip', label: 'autoskip_setting_aniskip' },
   { key: 'debug', label: 'autoskip_setting_debug' }
 ];
