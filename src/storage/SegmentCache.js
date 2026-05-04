@@ -1,5 +1,6 @@
-const STORAGE_KEY = 'autoskip_segment_cache';
+const STORAGE_KEY = 'autoskip_segment_cache_v2';
 const LEGACY_LOCAL_KEY = 'autoskip_segment_cache';
+const LEGACY_LAMPA_KEY = 'autoskip_segment_cache';
 const MAX_ENTRIES = 50;
 
 function getLampa() {
@@ -77,23 +78,24 @@ export class SegmentCache {
   load() {
     if (this._loaded) return this.data;
 
-    let stored = readLampa();
-    let migrated = false;
-
-    if (!stored) {
-      stored = readLocal();
-      if (stored) migrated = true;
-    }
+    const stored = readLampa();
 
     if (stored) this.data = stored;
     this._loaded = true;
 
-    if (migrated) {
-      this.save();
-      if (this.log) this.log('log', 'segment cache migrated from localStorage to Lampa.Storage');
-    }
+    this._dropLegacyKeys();
 
     return this.data;
+  }
+
+  _dropLegacyKeys() {
+    const lampa = getLampa();
+    if (lampa && lampa.Storage && typeof lampa.Storage.set === 'function') {
+      try { lampa.Storage.set(LEGACY_LAMPA_KEY, ''); } catch (e) { /* noop */ }
+    }
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try { window.localStorage.removeItem(LEGACY_LOCAL_KEY); } catch (e) { /* noop */ }
+    }
   }
 
   read(key) {

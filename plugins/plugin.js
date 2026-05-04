@@ -234,8 +234,9 @@
   var SETTINGS_DEFAULTS = DEFAULTS;
 
   // src/storage/SegmentCache.js
-  var STORAGE_KEY = "autoskip_segment_cache";
+  var STORAGE_KEY = "autoskip_segment_cache_v2";
   var LEGACY_LOCAL_KEY = "autoskip_segment_cache";
+  var LEGACY_LAMPA_KEY = "autoskip_segment_cache";
   var MAX_ENTRIES = 50;
   function getLampa3() {
     return typeof Lampa !== "undefined" ? Lampa : null;
@@ -264,15 +265,6 @@
     } catch (e) {
     }
     return null;
-  }
-  function readLocal() {
-    if (typeof window.localStorage === "undefined")
-      return null;
-    try {
-      return safeParse(window.localStorage.getItem(LEGACY_LOCAL_KEY));
-    } catch (e) {
-      return null;
-    }
   }
   function writeLampa(data) {
     const lampa = getLampa3();
@@ -315,22 +307,27 @@
     load() {
       if (this._loaded)
         return this.data;
-      let stored = readLampa();
-      let migrated = false;
-      if (!stored) {
-        stored = readLocal();
-        if (stored)
-          migrated = true;
-      }
+      const stored = readLampa();
       if (stored)
         this.data = stored;
       this._loaded = true;
-      if (migrated) {
-        this.save();
-        if (this.log)
-          this.log("log", "segment cache migrated from localStorage to Lampa.Storage");
-      }
+      this._dropLegacyKeys();
       return this.data;
+    }
+    _dropLegacyKeys() {
+      const lampa = getLampa3();
+      if (lampa && lampa.Storage && typeof lampa.Storage.set === "function") {
+        try {
+          lampa.Storage.set(LEGACY_LAMPA_KEY, "");
+        } catch (e) {
+        }
+      }
+      if (typeof window !== "undefined" && window.localStorage) {
+        try {
+          window.localStorage.removeItem(LEGACY_LOCAL_KEY);
+        } catch (e) {
+        }
+      }
     }
     read(key) {
       if (!this._loaded)
@@ -1121,7 +1118,10 @@
     minSegmentSec: 5,
     mergeGapSec: 3,
     introMaxFraction: 0.3,
+    introMinStartSec: 20,
+    introMinDurationSec: 25,
     creditsMinFraction: 0.7,
+    creditsMinDurationSec: 12,
     fftSize: 2048,
     voiceMusicMaxRatio: 0.45,
     silenceProbeWindows: 6,
@@ -1449,8 +1449,8 @@
         return;
       const introCutoff = duration * this.config.introMaxFraction;
       const creditsCutoff = duration * this.config.creditsMinFraction;
-      const introCandidates = filtered.filter((seg) => seg.start <= introCutoff).sort((a, b) => a.start - b.start);
-      const creditsCandidates = filtered.filter((seg) => seg.end >= creditsCutoff).sort((a, b) => a.start - b.start);
+      const introCandidates = filtered.filter((seg) => seg.start <= introCutoff).filter((seg) => seg.start >= this.config.introMinStartSec).filter((seg) => seg.end - seg.start >= this.config.introMinDurationSec).sort((a, b) => a.start - b.start);
+      const creditsCandidates = filtered.filter((seg) => seg.end >= creditsCutoff).filter((seg) => seg.end - seg.start >= this.config.creditsMinDurationSec).sort((a, b) => a.start - b.start);
       const newRanges = { intro: [], credits: [] };
       if (introCandidates.length)
         newRanges.intro.push(introCandidates[0]);
@@ -3689,7 +3689,7 @@
   // src/core/AutoSkipPlugin.js
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "3.1.1";
+      this.version = "3.1.2";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";

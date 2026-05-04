@@ -9,7 +9,10 @@ const DEFAULT_CONFIG = {
   minSegmentSec: 5,
   mergeGapSec: 3,
   introMaxFraction: 0.3,
+  introMinStartSec: 20,
+  introMinDurationSec: 25,
   creditsMinFraction: 0.7,
+  creditsMinDurationSec: 12,
   fftSize: 2048,
   voiceMusicMaxRatio: 0.45,
   silenceProbeWindows: 6,
@@ -342,9 +345,12 @@ export class AudioProvider extends ProviderBase {
 
     const introCandidates = filtered
       .filter((seg) => seg.start <= introCutoff)
+      .filter((seg) => seg.start >= this.config.introMinStartSec)
+      .filter((seg) => (seg.end - seg.start) >= this.config.introMinDurationSec)
       .sort((a, b) => a.start - b.start);
     const creditsCandidates = filtered
       .filter((seg) => seg.end >= creditsCutoff)
+      .filter((seg) => (seg.end - seg.start) >= this.config.creditsMinDurationSec)
       .sort((a, b) => a.start - b.start);
 
     const newRanges = { intro: [], credits: [] };
