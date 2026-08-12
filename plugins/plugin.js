@@ -2622,7 +2622,7 @@
   };
 
   // src/segments/providers/PrefetchAudioProvider.js
-  var HEAD_TIMEOUT_MS = 4e3;
+  var PROBE_TIMEOUT_MS = 6e3;
   var FETCH_TIMEOUT_MS2 = 3e4;
   var MAX_INTRO_BYTES = 8 * 1024 * 1024;
   var MAX_CREDITS_BYTES = 8 * 1024 * 1024;
@@ -2694,30 +2694,34 @@
       const src = video.currentSrc || video.src;
       if (!src)
         return;
-      const head = await this._head(src);
+      const probe2 = await this._probeSource(src);
       if (this.cancelled)
         return;
-      if (!head || !head.contentLength || !head.isMp4) {
+      if (!probe2 || !probe2.isMp4) {
         if (this.getSettings().debug)
-          this.log("log", "prefetch_audio: source not eligible", head);
+          this.log("log", "prefetch_audio: source not eligible", probe2);
         return;
       }
-      const introBlob = await this._fetchRange(src, 0, Math.min(MAX_INTRO_BYTES - 1, head.contentLength - 1));
+      const total = probe2.totalBytes;
+      const introEnd = total ? Math.min(MAX_INTRO_BYTES - 1, total - 1) : MAX_INTRO_BYTES - 1;
+      const introBlob = await this._fetchRange(src, 0, introEnd);
       if (this.cancelled || !introBlob)
         return;
       const introResult = await this._analyseSegment(introBlob, "intro");
       if (this.cancelled)
         return;
       let creditsResult = null;
-      if (head.contentLength > MAX_INTRO_BYTES + MAX_CREDITS_BYTES) {
-        const tailStart = Math.max(0, head.contentLength - MAX_CREDITS_BYTES);
-        const tailBlob = await this._fetchRange(src, tailStart, head.contentLength - 1);
+      if (total > MAX_INTRO_BYTES + MAX_CREDITS_BYTES) {
+        const tailStart = Math.max(0, total - MAX_CREDITS_BYTES);
+        const tailBlob = await this._fetchRange(src, tailStart, total - 1);
         if (this.cancelled)
           return;
         if (tailBlob)
-          creditsResult = await this._analyseSegment(tailBlob, "credits", { tailStart, totalBytes: head.contentLength, duration: video.duration });
+          creditsResult = await this._analyseSegment(tailBlob, "credits", { tailStart, totalBytes: total, duration: video.duration });
         if (this.cancelled)
           return;
+      } else if (!total && this.getSettings().debug) {
+        this.log("log", "prefetch_audio: размер файла не раскрыт (content-range скрыт CORS) — титры по звуку пропускаем.");
       }
       const ranges = { intro: [], credits: [] };
       if (introResult && introResult.intro)
@@ -2743,22 +2747,36 @@
         this._abort = null;
       }
     }
-    async _head(url) {
+    /**
+     * Проба источника двухбайтовым диапазонным запросом вместо HEAD.
+     *
+     * HEAD на раздающих CDN нередко просто висит и отваливается по таймауту —
+     * именно на этом провайдер и умирал, не дойдя до самих диапазонов. Обычный
+     * GET с Range отвечает быстро и заодно доказывает поддержку кодом 206.
+     */
+    async _probeSource(url) {
       let response;
       try {
-        response = await fetchWithTimeout2(url, { method: "HEAD", mode: "cors", credentials: "omit" }, HEAD_TIMEOUT_MS);
+        response = await fetchWithTimeout2(url, {
+          method: "GET",
+          headers: { Range: "bytes=0-1" },
+          mode: "cors",
+          credentials: "omit"
+        }, PROBE_TIMEOUT_MS);
       } catch (e) {
-        this.log("warn", "prefetch_audio: HEAD failed", e && e.message ? e.message : e);
+        this.log("warn", "prefetch_audio: проба диапазона не удалась", e && e.message ? e.message : e);
         return null;
       }
-      if (!response || !response.ok)
+      if (!response || response.status !== 206) {
+        this.log("warn", `prefetch_audio: на пробу диапазона получен ${response ? response.status : "нет ответа"} вместо 206.`);
         return null;
-      const accept = (response.headers.get("accept-ranges") || "").toLowerCase();
+      }
       const ct = response.headers.get("content-type") || "";
-      const len = Number(response.headers.get("content-length"));
+      const cr = response.headers.get("content-range") || "";
+      const m = cr.match(/\/\s*(\d+)\s*$/);
+      const total = m ? Number(m[1]) : 0;
       return {
-        acceptRanges: accept === "bytes",
-        contentLength: Number.isFinite(len) && len > 0 ? len : 0,
+        totalBytes: Number.isFinite(total) && total > 0 ? total : 0,
         contentType: ct,
         isMp4: isMp4ContentType(ct) || urlLooksLikeMp4(url)
       };
@@ -3988,7 +4006,7 @@
   // src/core/AutoSkipPlugin.js
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "3.1.6";
+      this.version = "3.1.7";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";

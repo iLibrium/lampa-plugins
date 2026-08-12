@@ -1,7 +1,7 @@
 import { ProviderBase } from './ProviderBase.js';
 import { computeMedian, mergeSegments } from '../ranges.js';
 
-const HEAD_TIMEOUT_MS = 4000;
+const PROBE_TIMEOUT_MS = 6000;
 const FETCH_TIMEOUT_MS = 30000;
 const MAX_INTRO_BYTES = 8 * 1024 * 1024;
 const MAX_CREDITS_BYTES = 8 * 1024 * 1024;
@@ -64,30 +64,32 @@ export class PrefetchAudioProvider extends ProviderBase {
     const src = video.currentSrc || video.src;
     if (!src) return;
 
-    const head = await this._head(src);
+    const probe = await this._probeSource(src);
     if (this.cancelled) return;
-    // На accept-ranges полагаться нельзя: CORS не отдаёт этот заголовок в JS,
-    // поэтому он всегда пуст на чужом origin и раньше глушил провайдер на
-    // источниках, которые диапазоны прекрасно поддерживают. Проверяем делом —
-    // по коду 206 на первый же запрос.
-    if (!head || !head.contentLength || !head.isMp4) {
-      if (this.getSettings().debug) this.log('log', 'prefetch_audio: source not eligible', head);
+    if (!probe || !probe.isMp4) {
+      if (this.getSettings().debug) this.log('log', 'prefetch_audio: source not eligible', probe);
       return;
     }
 
-    const introBlob = await this._fetchRange(src, 0, Math.min(MAX_INTRO_BYTES - 1, head.contentLength - 1));
+    // Ноль означает, что сервер не раскрыл content-range — размер неизвестен,
+    // но начало файла скачать это не мешает.
+    const total = probe.totalBytes;
+    const introEnd = total ? Math.min(MAX_INTRO_BYTES - 1, total - 1) : (MAX_INTRO_BYTES - 1);
+    const introBlob = await this._fetchRange(src, 0, introEnd);
     if (this.cancelled || !introBlob) return;
 
     const introResult = await this._analyseSegment(introBlob, 'intro');
     if (this.cancelled) return;
 
     let creditsResult = null;
-    if (head.contentLength > MAX_INTRO_BYTES + MAX_CREDITS_BYTES) {
-      const tailStart = Math.max(0, head.contentLength - MAX_CREDITS_BYTES);
-      const tailBlob = await this._fetchRange(src, tailStart, head.contentLength - 1);
+    if (total > MAX_INTRO_BYTES + MAX_CREDITS_BYTES) {
+      const tailStart = Math.max(0, total - MAX_CREDITS_BYTES);
+      const tailBlob = await this._fetchRange(src, tailStart, total - 1);
       if (this.cancelled) return;
-      if (tailBlob) creditsResult = await this._analyseSegment(tailBlob, 'credits', { tailStart, totalBytes: head.contentLength, duration: video.duration });
+      if (tailBlob) creditsResult = await this._analyseSegment(tailBlob, 'credits', { tailStart, totalBytes: total, duration: video.duration });
       if (this.cancelled) return;
+    } else if (!total && this.getSettings().debug) {
+      this.log('log', 'prefetch_audio: размер файла не раскрыт (content-range скрыт CORS) — титры по звуку пропускаем.');
     }
 
     const ranges = { intro: [], credits: [] };
@@ -111,21 +113,40 @@ export class PrefetchAudioProvider extends ProviderBase {
     }
   }
 
-  async _head(url) {
+  /**
+   * Проба источника двухбайтовым диапазонным запросом вместо HEAD.
+   *
+   * HEAD на раздающих CDN нередко просто висит и отваливается по таймауту —
+   * именно на этом провайдер и умирал, не дойдя до самих диапазонов. Обычный
+   * GET с Range отвечает быстро и заодно доказывает поддержку кодом 206.
+   */
+  async _probeSource(url) {
     let response;
     try {
-      response = await fetchWithTimeout(url, { method: 'HEAD', mode: 'cors', credentials: 'omit' }, HEAD_TIMEOUT_MS);
+      response = await fetchWithTimeout(url, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-1' },
+        mode: 'cors',
+        credentials: 'omit'
+      }, PROBE_TIMEOUT_MS);
     } catch (e) {
-      this.log('warn', 'prefetch_audio: HEAD failed', e && e.message ? e.message : e);
+      this.log('warn', 'prefetch_audio: проба диапазона не удалась', e && e.message ? e.message : e);
       return null;
     }
-    if (!response || !response.ok) return null;
-    const accept = (response.headers.get('accept-ranges') || '').toLowerCase();
+    if (!response || response.status !== 206) {
+      this.log('warn', `prefetch_audio: на пробу диапазона получен ${response ? response.status : 'нет ответа'} вместо 206.`);
+      return null;
+    }
+
     const ct = response.headers.get('content-type') || '';
-    const len = Number(response.headers.get('content-length'));
+    // content-range не safelisted, так что на чужом origin его обычно не видно.
+    // Тогда работаем без общего размера: вступление это не блокирует.
+    const cr = response.headers.get('content-range') || '';
+    const m = cr.match(/\/\s*(\d+)\s*$/);
+    const total = m ? Number(m[1]) : 0;
+
     return {
-      acceptRanges: accept === 'bytes',
-      contentLength: Number.isFinite(len) && len > 0 ? len : 0,
+      totalBytes: Number.isFinite(total) && total > 0 ? total : 0,
       contentType: ct,
       isMp4: isMp4ContentType(ct) || urlLooksLikeMp4(url)
     };
