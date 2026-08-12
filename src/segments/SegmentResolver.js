@@ -5,11 +5,12 @@ const SOURCE_PRIORITY = {
   audio: 1,
   visual: 2,
   prefetch_audio: 3,
-  subtitle: 4,
-  chapters: 5,
-  metadata: 6,
-  theintrodb: 7,
-  aniskip: 8
+  subtitle_gap: 4,
+  subtitle: 5,
+  chapters: 6,
+  metadata: 7,
+  theintrodb: 8,
+  aniskip: 9
 };
 
 const SOURCE_CONFIDENCE = {
@@ -17,6 +18,9 @@ const SOURCE_CONFIDENCE = {
   audio: 'low',
   visual: 'medium',
   prefetch_audio: 'medium',
+  // Провал реплик — догадка: так же выглядит долгая тихая сцена. Показываем
+  // кнопку, но автопропуск не разрешаем, пока догадку не подтвердит кто-то ещё.
+  subtitle_gap: 'low',
   subtitle: 'medium',
   chapters: 'high',
   metadata: 'high',

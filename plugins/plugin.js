@@ -878,17 +878,21 @@
     audio: 1,
     visual: 2,
     prefetch_audio: 3,
-    subtitle: 4,
-    chapters: 5,
-    metadata: 6,
-    theintrodb: 7,
-    aniskip: 8
+    subtitle_gap: 4,
+    subtitle: 5,
+    chapters: 6,
+    metadata: 7,
+    theintrodb: 8,
+    aniskip: 9
   };
   var SOURCE_CONFIDENCE = {
     cache: "medium",
     audio: "low",
     visual: "medium",
     prefetch_audio: "medium",
+    // Провал реплик — догадка: так же выглядит долгая тихая сцена. Показываем
+    // кнопку, но автопропуск не разрешаем, пока догадку не подтвердит кто-то ещё.
+    subtitle_gap: "low",
     subtitle: "medium",
     chapters: "high",
     metadata: "high",
@@ -2110,6 +2114,13 @@
   var MIN_INTRO_LEN_SEC = 8;
   var MIN_RECAP_LEN_SEC = 10;
   var SILENCE_GAP_FOR_CREDITS_SEC = 75;
+  var INTRO_ZONE_MAX_SEC = 600;
+  var MIN_GAP_INTRO_SEC = 45;
+  var MAX_GAP_INTRO_SEC = 180;
+  var MAX_INTRO_START_SEC = 240;
+  var MAX_LEADING_GAP_INTRO_SEC = 130;
+  var GAP_MEDIAN_RATIO = 4;
+  var MIN_CUES_FOR_GAP = 3;
   function maybeFetchSubtitleUrl(url, timeoutMs = 6e3) {
     if (typeof fetch !== "function")
       return Promise.resolve(null);
@@ -2216,16 +2227,35 @@
       const duration = Number.isFinite(video.duration) ? video.duration : 0;
       if (duration <= 0)
         return;
-      const ranges = this._analyse(cues, duration);
+      const { ranges, strategy } = this._analyse(cues, duration);
       if (!ranges.intro.length && !ranges.credits.length) {
         if (debug)
-          this.log("log", `subtitle provider: ${cues.length} cues collected, no intro/credits markers matched.`);
+          this.log("log", `subtitle provider: ${cues.length} cues collected, no markers and no dialogue gap matched.`);
         return;
       }
       if (debug) {
-        this.log("log", `subtitle provider: ${cues.length} cues, segments`, { intro: ranges.intro, credits: ranges.credits });
+        this.log("log", `subtitle provider: ${cues.length} cues, segments`, {
+          intro: ranges.intro,
+          credits: ranges.credits,
+          strategy
+        });
       }
-      onUpdate(ranges, { confidence: "medium", source: "subtitle", cues: cues.length });
+      const byGap = strategy.intro === "dialogue-gap";
+      const marked = {
+        intro: byGap ? [] : ranges.intro,
+        credits: ranges.credits
+      };
+      if (marked.intro.length || marked.credits.length) {
+        onUpdate(marked, { confidence: "medium", source: "subtitle", cues: cues.length, strategy });
+      }
+      if (byGap) {
+        onUpdate({ intro: ranges.intro, credits: [] }, {
+          confidence: "low",
+          source: "subtitle_gap",
+          cues: cues.length,
+          strategy
+        });
+      }
     }
     async _collectCues(video) {
       for (let attempt = 0; attempt < COLLECTION_RETRIES; attempt += 1) {
@@ -2284,36 +2314,83 @@
     }
     _analyse(cues, duration) {
       const ranges = { intro: [], credits: [] };
+      const strategy = { intro: null, credits: null };
       const introZone = duration * 0.3;
       const creditsZone = duration * 0.7;
       const introMusic = cues.filter((c) => c.start <= introZone && MUSIC_MARKERS.test(c.text));
       if (introMusic.length) {
         const start = Math.min.apply(null, introMusic.map((c) => c.start));
         const end = Math.max.apply(null, introMusic.map((c) => c.end));
-        if (end - start >= MIN_INTRO_LEN_SEC)
+        if (end - start >= MIN_INTRO_LEN_SEC) {
           ranges.intro.push({ start, end });
+          strategy.intro = "music-markers";
+        }
       }
       if (!ranges.intro.length) {
         const recap = cues.filter((c) => c.start <= introZone && RECAP_MARKERS.test(c.text));
         if (recap.length) {
           const start = Math.min.apply(null, recap.map((c) => c.start));
           const end = Math.max.apply(null, recap.map((c) => c.end));
-          if (end - start >= MIN_RECAP_LEN_SEC)
+          if (end - start >= MIN_RECAP_LEN_SEC) {
             ranges.intro.push({ start, end });
+            strategy.intro = "recap-markers";
+          }
+        }
+      }
+      if (!ranges.intro.length) {
+        const gap = this._findIntroByDialogueGap(cues, duration);
+        if (gap) {
+          ranges.intro.push({ start: gap.start, end: gap.end });
+          strategy.intro = "dialogue-gap";
         }
       }
       const creditsCue = cues.filter((c) => c.start >= creditsZone && (CREDITS_MARKERS_EN.test(c.text) || CREDITS_MARKERS_RU.test(c.text)));
       if (creditsCue.length) {
         const start = Math.min.apply(null, creditsCue.map((c) => c.start));
         ranges.credits.push({ start, end: duration });
+        strategy.credits = "credits-markers";
       } else {
         const lastBody = cues.filter((c) => c.end < creditsZone).pop();
         const tailCues = cues.filter((c) => c.start >= creditsZone);
         if (!tailCues.length && lastBody && duration - lastBody.end >= SILENCE_GAP_FOR_CREDITS_SEC) {
           ranges.credits.push({ start: lastBody.end + 5, end: duration });
+          strategy.credits = "tail-silence";
         }
       }
-      return ranges;
+      return { ranges, strategy };
+    }
+    /**
+     * Ищет вступление как самый длинный провал между репликами в начале серии.
+     * Границы провала — это конец последней реплики перед заставкой и начало
+     * первой после неё, то есть пропуск попадает ровно на возобновление диалога.
+     */
+    _findIntroByDialogueGap(cues, duration) {
+      const zoneEnd = Math.min(duration * 0.3, INTRO_ZONE_MAX_SEC);
+      const zone = cues.filter((c) => c.start < zoneEnd).slice().sort((a, b) => a.start - b.start);
+      if (zone.length < MIN_CUES_FOR_GAP)
+        return null;
+      const points = [{ start: 0, end: 0 }].concat(zone);
+      const gaps = [];
+      for (let i = 1; i < points.length; i += 1) {
+        const len = points[i].start - points[i - 1].end;
+        if (len > 0)
+          gaps.push({ start: points[i - 1].end, end: points[i].start, len });
+      }
+      if (!gaps.length)
+        return null;
+      const median = computeMedian(gaps.map((g) => g.len));
+      const best = gaps.reduce((a, b) => b.len > a.len ? b : a);
+      if (best.len < MIN_GAP_INTRO_SEC)
+        return null;
+      if (best.len > MAX_GAP_INTRO_SEC)
+        return null;
+      if (best.start > MAX_INTRO_START_SEC)
+        return null;
+      if (best.start <= 0 && best.len > MAX_LEADING_GAP_INTRO_SEC)
+        return null;
+      if (median > 0 && best.len < median * GAP_MEDIAN_RATIO)
+        return null;
+      return { start: best.start, end: best.end, median };
     }
   };
 
@@ -3907,7 +3984,7 @@
   // src/core/AutoSkipPlugin.js
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "3.1.4";
+      this.version = "3.1.5";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";
@@ -4212,7 +4289,9 @@
           this.log("log", `provider ${provider.name} starting.`);
         const result = provider.run(
           { video: this.video, capabilities: this.capabilities },
-          (ranges, meta) => this._onProviderUpdate(provider.name, ranges, meta)
+          // Провайдер может отдавать результаты под разными источниками, если у
+          // них разная надёжность (см. subtitle против subtitle_gap).
+          (ranges, meta) => this._onProviderUpdate(meta && meta.source || provider.name, ranges, meta)
         );
         if (result && typeof result.catch === "function") {
           result.catch((err) => this.log("warn", `${provider.name} provider failed`, err));

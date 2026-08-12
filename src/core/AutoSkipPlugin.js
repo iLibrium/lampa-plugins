@@ -25,7 +25,7 @@ import { t as translate, registerTranslations } from '../util/i18n.js';
 
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '3.1.4';
+    this.version = '3.1.5';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';
@@ -329,7 +329,9 @@ export class AutoSkipPlugin {
       if (this.settings.debug) this.log('log', `provider ${provider.name} starting.`);
       const result = provider.run(
         { video: this.video, capabilities: this.capabilities },
-        (ranges, meta) => this._onProviderUpdate(provider.name, ranges, meta)
+        // Провайдер может отдавать результаты под разными источниками, если у
+        // них разная надёжность (см. subtitle против subtitle_gap).
+        (ranges, meta) => this._onProviderUpdate((meta && meta.source) || provider.name, ranges, meta)
       );
       if (result && typeof result.catch === 'function') {
         result.catch((err) => this.log('warn', `${provider.name} provider failed`, err));
