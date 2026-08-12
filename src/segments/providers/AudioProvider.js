@@ -1,5 +1,6 @@
 import { ProviderBase } from './ProviderBase.js';
 import { computeMedian, mergeSegments, rangesEqual } from '../ranges.js';
+import { describeMediaAccess } from '../../playback/mediaAccess.js';
 
 const DEFAULT_CONFIG = {
   windowSec: 0.5,
@@ -55,11 +56,24 @@ export class AudioProvider extends ProviderBase {
     this._silenceProbeRemaining = 0;
     this._taintedDetected = false;
     this._lastProgressLogAt = 0;
+    this._lastAccessReason = null;
   }
 
   isApplicable(ctx) {
     if (!ctx || !ctx.video) return false;
     if (ctx.capabilities && ctx.capabilities.audioContext === false) return false;
+
+    // На закрытом потоке Web Audio отдаст тишину, а звук элемента уже будет
+    // уведён в граф — поэтому проверяем доступ до, а не после запуска.
+    const access = describeMediaAccess(ctx.video);
+    if (!access.readable) {
+      this.log('log', `audio provider not started: ${access.reason}.`);
+      return false;
+    }
+    if (this._lastAccessReason !== access.reason) {
+      this._lastAccessReason = access.reason;
+      this.log('log', `audio provider: доступ к содержимому есть (${access.reason}).`);
+    }
     return true;
   }
 

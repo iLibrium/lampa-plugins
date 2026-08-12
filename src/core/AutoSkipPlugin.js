@@ -1,4 +1,4 @@
-import { createLogger } from './logger.js';
+﻿import { createLogger } from './logger.js';
 import { probe as probeCapabilities } from './capabilities.js';
 import { SettingsStore, SETTINGS_DEFAULTS } from '../storage/SettingsStore.js';
 import { SegmentCache } from '../storage/SegmentCache.js';
@@ -25,7 +25,7 @@ import { t as translate, registerTranslations } from '../util/i18n.js';
 
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '3.1.3';
+    this.version = '3.1.4';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';
@@ -257,7 +257,7 @@ export class AutoSkipPlugin {
       const creditsHigh = this.resolver.hasHighConfidence('credits');
 
       if (introHigh && creditsHigh) {
-        if (this.settings.debug) this.log('log', 'fallback providers skipped — both segments resolved by high-confidence sources.');
+        if (this.settings.debug) this.log('log', 'fallback providers skipped вЂ” both segments resolved by high-confidence sources.');
         return;
       }
 
@@ -282,7 +282,7 @@ export class AutoSkipPlugin {
       const hasAny = (ranges.intro && ranges.intro.length) || (ranges.credits && ranges.credits.length);
       if (hasAny) return;
       if (!this.settings.debug) return;
-      this.log('log', 'AutoSkip: no segments found by any provider — content not covered.');
+      this.log('log', 'AutoSkip: no segments found by any provider вЂ” content not covered.');
     }, 90000);
   }
 
@@ -360,7 +360,7 @@ export class AutoSkipPlugin {
       if (!ranges.length) return;
       const last = ranges[ranges.length - 1];
       if (last.end < t) {
-        this.log('log', `${kind} detected retroactively (${last.start.toFixed(1)}-${last.end.toFixed(1)}s, now ${t.toFixed(1)}s) — cached for next playthrough.`);
+        this.log('log', `${kind} detected retroactively (${last.start.toFixed(1)}-${last.end.toFixed(1)}s, now ${t.toFixed(1)}s) вЂ” cached for next playthrough.`);
       }
     });
   }

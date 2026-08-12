@@ -1109,6 +1109,46 @@
     }
   };
 
+  // src/playback/mediaAccess.js
+  var PROBE_SIZE = 2;
+  function describeMediaAccess(video) {
+    if (!video)
+      return { readable: false, reason: "нет video-элемента" };
+    const src = video.currentSrc || video.src || "";
+    if (!src)
+      return { readable: false, retryable: true, reason: "источник ещё не назначен" };
+    if (src.indexOf("blob:") === 0) {
+      return { readable: true, reason: "blob (MSE) — данные уже в странице" };
+    }
+    if (typeof location !== "undefined") {
+      try {
+        if (new URL(src, location.href).origin === location.origin) {
+          return { readable: true, reason: "источник того же origin" };
+        }
+      } catch (e) {
+      }
+    }
+    if (typeof document === "undefined" || typeof document.createElement !== "function") {
+      return { readable: false, reason: "нет document для пробы" };
+    }
+    if (video.readyState < 2 || !video.videoWidth) {
+      return { readable: false, retryable: true, reason: "кадр ещё не декодирован" };
+    }
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = PROBE_SIZE;
+      canvas.height = PROBE_SIZE;
+      const ctx = canvas.getContext("2d");
+      if (!ctx)
+        return { readable: false, reason: "нет 2d-контекста" };
+      ctx.drawImage(video, 0, 0, PROBE_SIZE, PROBE_SIZE);
+      ctx.getImageData(0, 0, PROBE_SIZE, PROBE_SIZE);
+      return { readable: true, reason: "проба чтения прошла" };
+    } catch (e) {
+      return { readable: false, reason: "cross-origin без CORS-заголовков" };
+    }
+  }
+
   // src/segments/providers/AudioProvider.js
   var DEFAULT_CONFIG = {
     windowSec: 0.5,
@@ -1161,12 +1201,22 @@
       this._silenceProbeRemaining = 0;
       this._taintedDetected = false;
       this._lastProgressLogAt = 0;
+      this._lastAccessReason = null;
     }
     isApplicable(ctx) {
       if (!ctx || !ctx.video)
         return false;
       if (ctx.capabilities && ctx.capabilities.audioContext === false)
         return false;
+      const access = describeMediaAccess(ctx.video);
+      if (!access.readable) {
+        this.log("log", `audio provider not started: ${access.reason}.`);
+        return false;
+      }
+      if (this._lastAccessReason !== access.reason) {
+        this._lastAccessReason = access.reason;
+        this.log("log", `audio provider: доступ к содержимому есть (${access.reason}).`);
+      }
       return true;
     }
     async run(ctx) {
@@ -3857,7 +3907,7 @@
   // src/core/AutoSkipPlugin.js
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "3.1.3";
+      this.version = "3.1.4";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";
@@ -4074,7 +4124,7 @@
         const creditsHigh = this.resolver.hasHighConfidence("credits");
         if (introHigh && creditsHigh) {
           if (this.settings.debug)
-            this.log("log", "fallback providers skipped — both segments resolved by high-confidence sources.");
+            this.log("log", "fallback providers skipped вЂ” both segments resolved by high-confidence sources.");
           return;
         }
         this._runProvider(this.prefetchAudioProvider);
@@ -4101,7 +4151,7 @@
           return;
         if (!this.settings.debug)
           return;
-        this.log("log", "AutoSkip: no segments found by any provider — content not covered.");
+        this.log("log", "AutoSkip: no segments found by any provider вЂ” content not covered.");
       }, 9e4);
     }
     onPlayerStop() {
@@ -4197,7 +4247,7 @@
           return;
         const last = ranges[ranges.length - 1];
         if (last.end < t2) {
-          this.log("log", `${kind} detected retroactively (${last.start.toFixed(1)}-${last.end.toFixed(1)}s, now ${t2.toFixed(1)}s) — cached for next playthrough.`);
+          this.log("log", `${kind} detected retroactively (${last.start.toFixed(1)}-${last.end.toFixed(1)}s, now ${t2.toFixed(1)}s) вЂ” cached for next playthrough.`);
         }
       });
     }
