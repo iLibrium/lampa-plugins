@@ -2951,58 +2951,201 @@
     const style = document.createElement("style");
     style.id = SKIP_PROMPT_STYLE_ID;
     style.textContent = `
-    .player-panel__skip-prompt {
-      position: absolute;
-      bottom: 100%;
-      right: 1.5em;
-      margin-bottom: 0.8em;
-      display: none;
-      align-items: center;
-      gap: 0.6em;
-      pointer-events: auto;
-      z-index: 5;
-    }
-    .player-panel__skip-prompt.is-visible {
+    .autoskip-prompt {
+      --autoskip-accent: #FF8A00;
+      --autoskip-progress-duration: 5000ms;
+      --autoskip-ease: cubic-bezier(0.22, 0.9, 0.3, 1);
+
+      position: fixed;
+      right: 2.4em;
+      bottom: 7.2em;
+      z-index: 60;
+
       display: flex;
+      align-items: center;
+      gap: 0.7em;
+
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transform: translate3d(0, 1.1em, 0);
+      transition:
+        opacity 200ms linear,
+        transform 280ms var(--autoskip-ease),
+        visibility 0s linear 280ms;
+      will-change: transform, opacity;
     }
-    .autoskip-prompt__skip {
+    .autoskip-prompt.is-visible {
+      opacity: 1;
+      visibility: visible;
+      pointer-events: auto;
+      transform: translate3d(0, 0, 0);
+      transition-delay: 0s;
+    }
+
+    .autoskip-prompt .selector {
       position: relative;
       overflow: hidden;
-    }
-    .autoskip-prompt__skip-label {
       display: inline-flex;
       align-items: center;
-      gap: 0.35em;
+      justify-content: center;
+      padding: 0.62em 1.25em;
+      border-radius: 0.6em;
+      background: rgba(28, 28, 30, 0.86);
+      color: #fff;
+      font-weight: 500;
+      white-space: nowrap;
+      transform: translate3d(0, 0, 0);
+      transition:
+        transform 180ms var(--autoskip-ease),
+        background-color 180ms linear,
+        color 180ms linear;
     }
+    .autoskip-prompt .selector.focus {
+      background: #fff;
+      color: #101010;
+      transform: translate3d(0, 0, 0) scale(1.06);
+      box-shadow: 0 0 0 0.16em rgba(255, 255, 255, 0.22);
+    }
+
+    .autoskip-prompt__cancel {
+      opacity: 0;
+      transition:
+        opacity 200ms linear 90ms,
+        transform 180ms var(--autoskip-ease),
+        background-color 180ms linear,
+        color 180ms linear;
+    }
+    .autoskip-prompt.is-visible .autoskip-prompt__cancel {
+      opacity: 1;
+    }
+
+    .autoskip-prompt__skip-label {
+      position: relative;
+      z-index: 2;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45em;
+    }
+
     .autoskip-prompt__confidence-mark {
-      font-size: 0.85em;
-      opacity: 0.7;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 1.55em;
+      height: 1.55em;
+      padding: 0 0.35em;
+      border-radius: 0.8em;
+      font-size: 0.78em;
+      font-weight: 700;
+      line-height: 1;
+      background: rgba(0, 0, 0, 0.22);
+      color: inherit;
+      opacity: 0.9;
     }
+    .autoskip-prompt .selector:not(.focus) .autoskip-prompt__confidence-mark {
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    .autoskip-prompt__skip::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 45%;
+      height: 100%;
+      background: linear-gradient(
+        100deg,
+        rgba(255, 138, 0, 0) 0%,
+        rgba(255, 138, 0, 0.45) 50%,
+        rgba(255, 138, 0, 0) 100%
+      );
+      transform: translate3d(-170%, 0, 0);
+      opacity: 0;
+      pointer-events: none;
+      z-index: 1;
+    }
+    .autoskip-prompt.is-visible .autoskip-prompt__skip::before {
+      animation: autoskip-shine 780ms var(--autoskip-ease) 160ms 1;
+    }
+    @keyframes autoskip-shine {
+      0%   { transform: translate3d(-170%, 0, 0); opacity: 0; }
+      35%  { opacity: 1; }
+      100% { transform: translate3d(330%, 0, 0); opacity: 0; }
+    }
+
     .autoskip-prompt__progress {
+      /* Мягкий хвост справа — иначе граница заливки читается как артефакт. */
+      --autoskip-fill: rgba(255, 138, 0, 0.34);
+      --autoskip-fill-edge: rgba(255, 138, 0, 0.10);
+      --autoskip-bar: var(--autoskip-accent);
+
       position: absolute;
       left: 0;
-      bottom: 0;
+      top: 0;
       width: 100%;
-      height: 0.3em;
-      background: #FF8A00;
+      height: 100%;
+      background: linear-gradient(
+        to right,
+        var(--autoskip-fill) 0%,
+        var(--autoskip-fill) 86%,
+        var(--autoskip-fill-edge) 100%
+      );
       transform: scaleX(0);
       transform-origin: left center;
       will-change: transform;
       pointer-events: none;
-      border-radius: 0 0 1em 1em;
+      z-index: 0;
     }
+    .autoskip-prompt__progress::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      bottom: 0;
+      width: 100%;
+      height: 0.26em;
+      background: var(--autoskip-bar);
+    }
+    .autoskip-prompt.is-counting .autoskip-prompt__progress {
+      animation: autoskip-progress var(--autoskip-progress-duration) linear forwards;
+    }
+    .autoskip-prompt.is-counting.is-paused .autoskip-prompt__progress {
+      animation-play-state: paused;
+    }
+    @keyframes autoskip-progress {
+      from { transform: scaleX(0); }
+      to   { transform: scaleX(1); }
+    }
+
     .autoskip-prompt--confidence-low .autoskip-prompt__progress {
-      background: rgba(255, 138, 0, 0.55);
+      --autoskip-fill: rgba(255, 138, 0, 0.18);
+      --autoskip-fill-edge: rgba(255, 138, 0, 0.06);
+      --autoskip-bar: rgba(255, 138, 0, 0.6);
     }
     .autoskip-prompt--confidence-medium .autoskip-prompt__progress {
-      background: rgba(255, 138, 0, 0.85);
+      --autoskip-fill: rgba(255, 138, 0, 0.28);
+      --autoskip-fill-edge: rgba(255, 138, 0, 0.08);
     }
-    .autoskip-prompt--standalone {
-      position: fixed;
-      right: 2em;
-      bottom: 2em;
-      z-index: 9999;
-      margin-bottom: 0;
+    /* На несфокусированной кнопке плотная оранжевая заливка выглядит грязно. */
+    .autoskip-prompt .selector:not(.focus) .autoskip-prompt__progress {
+      --autoskip-fill: rgba(255, 165, 60, 0.16);
+      --autoskip-fill-edge: rgba(255, 165, 60, 0.05);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .autoskip-prompt {
+        transform: none;
+        transition: opacity 120ms linear, visibility 0s linear 120ms;
+      }
+      .autoskip-prompt.is-visible {
+        transform: none;
+      }
+      .autoskip-prompt.is-visible .autoskip-prompt__skip::before {
+        animation: none;
+      }
+      .autoskip-prompt .selector.focus {
+        transform: none;
+      }
     }
   `;
     document.head.appendChild(style);
@@ -3010,15 +3153,13 @@
 
   // src/ui/SkipPrompt/progressTimer.js
   var ProgressTimer = class {
-    constructor({ duration = 5e3, onTick, onDone }) {
+    constructor({ duration = 5e3, onDone }) {
       this.duration = duration;
-      this.onTick = onTick || (() => {
-      });
       this.onDone = onDone || (() => {
       });
-      this._raf = null;
+      this._timeout = null;
       this._startedAt = 0;
-      this._elapsedBeforePause = 0;
+      this._elapsed = 0;
       this._running = false;
       this._cancelled = false;
       this._completed = false;
@@ -3026,46 +3167,31 @@
     start() {
       this._cancelled = false;
       this._completed = false;
-      this._elapsedBeforePause = 0;
-      this._startedAt = this._now();
-      this._running = true;
-      this._loop();
+      this._elapsed = 0;
+      this._arm();
     }
     pause() {
       if (!this._running)
         return;
-      this._elapsedBeforePause += this._now() - this._startedAt;
+      this._elapsed += this._now() - this._startedAt;
       this._running = false;
-      if (this._raf) {
-        try {
-          cancelAnimationFrame(this._raf);
-        } catch (e) {
-        }
-        this._raf = null;
-      }
+      this._clearTimeout();
     }
     resume() {
       if (this._running || this._cancelled || this._completed)
         return;
-      this._startedAt = this._now();
-      this._running = true;
-      this._loop();
+      this._arm();
     }
+    /** Сброс на ноль без запуска: отсчёт считается отменённым. */
     reset() {
       this.cancel();
-      this._elapsedBeforePause = 0;
+      this._elapsed = 0;
       this._completed = false;
     }
     cancel() {
       this._cancelled = true;
       this._running = false;
-      if (this._raf) {
-        try {
-          cancelAnimationFrame(this._raf);
-        } catch (e) {
-        }
-        this._raf = null;
-      }
+      this._clearTimeout();
     }
     isRunning() {
       return this._running;
@@ -3073,34 +3199,40 @@
     isCompleted() {
       return this._completed;
     }
+    remaining() {
+      const spent = this._running ? this._elapsed + (this._now() - this._startedAt) : this._elapsed;
+      return Math.max(0, this.duration - spent);
+    }
+    _arm() {
+      this._startedAt = this._now();
+      this._running = true;
+      this._clearTimeout();
+      this._timeout = setTimeout(() => {
+        this._timeout = null;
+        if (this._cancelled)
+          return;
+        this._running = false;
+        this._completed = true;
+        try {
+          this.onDone();
+        } catch (e) {
+        }
+      }, this.remaining());
+    }
+    _clearTimeout() {
+      if (this._timeout === null)
+        return;
+      try {
+        clearTimeout(this._timeout);
+      } catch (e) {
+      }
+      this._timeout = null;
+    }
     _now() {
       if (typeof performance !== "undefined" && typeof performance.now === "function") {
         return performance.now();
       }
       return Date.now();
-    }
-    _loop() {
-      const tick = () => {
-        if (this._cancelled || !this._running)
-          return;
-        const elapsed = this._elapsedBeforePause + (this._now() - this._startedAt);
-        const pct = Math.max(0, Math.min(1, elapsed / this.duration));
-        try {
-          this.onTick(pct);
-        } catch (e) {
-        }
-        if (pct >= 1) {
-          this._running = false;
-          this._completed = true;
-          try {
-            this.onDone();
-          } catch (e) {
-          }
-          return;
-        }
-        this._raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame(tick) : setTimeout(tick, 16);
-      };
-      tick();
     }
   };
 
@@ -3286,20 +3418,20 @@
   };
 
   // src/ui/SkipPrompt/SkipPrompt.js
-  var PANEL_SELECTORS = [".player .player-panel__body", ".player .player-panel", ".player-panel__body", ".player-panel"];
+  var PLAYER_SELECTORS = [".player", ".player-video", "#app .player"];
   function findMountTarget() {
     if (typeof document === "undefined")
       return null;
-    for (const selector of PANEL_SELECTORS) {
+    for (const selector of PLAYER_SELECTORS) {
       const el = document.querySelector(selector);
       if (el)
         return el;
     }
-    return null;
+    return document.body || null;
   }
   function buildElement() {
     const root = document.createElement("div");
-    root.className = "player-panel__skip-prompt autoskip-prompt";
+    root.className = "autoskip-prompt";
     const cancel = document.createElement("div");
     cancel.className = "simple-button selector autoskip-prompt__cancel";
     const cancelLabel = document.createElement("span");
@@ -3307,6 +3439,9 @@
     cancel.appendChild(cancelLabel);
     const skip = document.createElement("div");
     skip.className = "simple-button selector autoskip-prompt__skip";
+    const progress = document.createElement("div");
+    progress.className = "autoskip-prompt__progress";
+    skip.appendChild(progress);
     const labelWrap = document.createElement("span");
     labelWrap.className = "autoskip-prompt__skip-label";
     const skipLabel = document.createElement("span");
@@ -3317,9 +3452,6 @@
     confidenceMark.style.display = "none";
     labelWrap.appendChild(confidenceMark);
     skip.appendChild(labelWrap);
-    const progress = document.createElement("div");
-    progress.className = "autoskip-prompt__progress";
-    skip.appendChild(progress);
     root.appendChild(cancel);
     root.appendChild(skip);
     return { root, cancel, skip, progress, confidenceMark };
@@ -3336,28 +3468,23 @@
       this.parts = null;
       this.controller = null;
       this.timer = null;
-      this._mountedAs = null;
       this._video = null;
       this._videoEvents = null;
       this._visible = false;
+      this._activeSegment = null;
+      this._activeConfidence = null;
     }
     attachToVideo(video) {
       this._detachVideo();
       this._video = video;
       if (!video)
         return;
-      const onPause = () => {
-        if (this.timer)
-          this.timer.pause();
-      };
+      const onPause = () => this._pauseCountdown();
       const onPlaying = () => {
-        if (this.timer && this._visible)
-          this.timer.resume();
+        if (this._visible)
+          this._resumeCountdown();
       };
-      const onSeeking = () => {
-        if (this.timer)
-          this.timer.reset();
-      };
+      const onSeeking = () => this._stopCountdown();
       video.addEventListener("pause", onPause);
       video.addEventListener("playing", onPlaying);
       video.addEventListener("seeking", onSeeking);
@@ -3383,7 +3510,7 @@
     }
     _ensure() {
       ensureSkipPromptStyles();
-      if (this.parts && document.body.contains(this.parts.root))
+      if (this.parts && this.parts.root.isConnected)
         return this.parts;
       if (this.parts) {
         try {
@@ -3393,43 +3520,38 @@
       }
       this.parts = buildElement();
       const target = findMountTarget();
-      if (target) {
-        target.appendChild(this.parts.root);
-        this._mountedAs = "panel";
-      } else {
-        this.parts.root.classList.add("autoskip-prompt--standalone");
-        document.body.appendChild(this.parts.root);
-        this._mountedAs = "standalone";
-      }
+      if (!target)
+        return this.parts;
+      target.appendChild(this.parts.root);
+      void this.parts.root.offsetWidth;
       this.parts.cancel.addEventListener("click", () => this._handleCancel());
       this.parts.skip.addEventListener("click", () => this._handleSkip());
       return this.parts;
     }
     show(segment, options) {
       const parts = this._ensure();
+      if (!parts.root.isConnected)
+        return;
       this._activeSegment = segment;
       const opts = options || {};
       const confidence = opts.confidence || "high";
       this._activeConfidence = confidence;
       const autoSkipAllowed = opts.autoSkip !== false;
-      parts.root.classList.add("is-visible");
-      parts.root.classList.remove("autoskip-prompt--confidence-low", "autoskip-prompt--confidence-medium", "autoskip-prompt--confidence-high");
+      parts.root.classList.remove(
+        "autoskip-prompt--confidence-low",
+        "autoskip-prompt--confidence-medium",
+        "autoskip-prompt--confidence-high"
+      );
       parts.root.classList.add(`autoskip-prompt--confidence-${confidence}`);
       if (parts.confidenceMark) {
-        if (confidence === "low") {
-          parts.confidenceMark.style.display = "";
-          parts.confidenceMark.textContent = "?";
-        } else if (confidence === "medium") {
-          parts.confidenceMark.style.display = "";
-          parts.confidenceMark.textContent = "~";
-        } else {
-          parts.confidenceMark.style.display = "none";
-          parts.confidenceMark.textContent = "";
-        }
+        const mark = confidence === "low" ? "?" : confidence === "medium" ? "~" : "";
+        parts.confidenceMark.textContent = mark;
+        parts.confidenceMark.style.display = mark ? "" : "none";
       }
       parts.cancel.classList.remove("focus");
       parts.skip.classList.add("focus");
-      parts.progress.style.transform = "scaleX(0)";
+      parts.root.style.setProperty("--autoskip-progress-duration", `${this.durationMs}ms`);
+      parts.root.classList.add("is-visible");
       if (!this.controller) {
         this.controller = new PromptController({
           root: parts.root,
@@ -3438,49 +3560,95 @@
           onCancel: () => this._handleCancel()
         });
       }
-      if (!this._visible) {
+      if (!this._visible)
         this.controller.takeover(parts.skip);
-      }
       this._visible = true;
       if (autoSkipAllowed && confidence !== "low")
-        this._restartTimer();
+        this._startCountdown();
       else
-        this._cancelTimer();
+        this._stopCountdown();
     }
-    _cancelTimer() {
-      if (this.timer) {
-        this.timer.cancel();
-        this.timer = null;
-      }
-    }
-    _restartTimer() {
-      this._cancelTimer();
+    _startCountdown() {
+      this._stopCountdown();
       if (!this.parts)
         return;
-      const { progress } = this.parts;
+      const { root } = this.parts;
+      root.classList.remove("is-counting", "is-paused");
+      void root.offsetWidth;
+      root.classList.add("is-counting");
       this.timer = new ProgressTimer({
         duration: this.durationMs,
-        onTick: (pct) => {
-          progress.style.transform = `scaleX(${pct})`;
-        },
-        onDone: () => this._handleSkip(true)
+        onDone: () => this._handleTimeout()
       });
       this.timer.start();
+      if (this._video && this._video.paused)
+        this._pauseCountdown();
     }
-    hide() {
+    _pauseCountdown() {
+      if (!this.timer)
+        return;
+      this.timer.pause();
+      if (this.parts)
+        this.parts.root.classList.add("is-paused");
+    }
+    _resumeCountdown() {
+      if (!this.timer)
+        return;
+      this.timer.resume();
+      if (this.parts && this.timer.isRunning())
+        this.parts.root.classList.remove("is-paused");
+    }
+    _stopCountdown() {
       if (this.timer) {
         this.timer.cancel();
         this.timer = null;
       }
+      if (this.parts)
+        this.parts.root.classList.remove("is-counting", "is-paused");
+    }
+    /**
+     * Автопропуск разрешён, только если промпт реально отрисован. Страховка от
+     * повторения бага, когда кнопка была скрыта, а пропуск всё равно срабатывал.
+     */
+    _isReallyVisible() {
+      if (!this.parts || !this.parts.root.isConnected)
+        return false;
+      if (typeof window === "undefined" || typeof window.getComputedStyle !== "function")
+        return true;
+      const root = this.parts.root;
+      const rect = root.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0)
+        return false;
+      let node = root;
+      let depth = 0;
+      while (node && node !== document.documentElement && depth < 24) {
+        const cs = window.getComputedStyle(node);
+        if (cs.display === "none" || cs.visibility === "hidden")
+          return false;
+        if (Number(cs.opacity) < 0.05)
+          return false;
+        node = node.parentElement;
+        depth += 1;
+      }
+      return true;
+    }
+    _handleTimeout() {
+      if (!this._isReallyVisible()) {
+        this.log("warn", "auto-skip suppressed: prompt is not visible on screen.");
+        this._stopCountdown();
+        return;
+      }
+      this._handleSkip();
+    }
+    hide() {
+      this._stopCountdown();
       if (this.parts) {
         this.parts.root.classList.remove("is-visible");
         this.parts.skip.classList.remove("focus");
         this.parts.cancel.classList.remove("focus");
-        this.parts.progress.style.transform = "scaleX(0)";
       }
-      if (this.controller && this._visible) {
+      if (this.controller && this._visible)
         this.controller.release();
-      }
       this._visible = false;
       this._activeSegment = null;
     }
@@ -3689,7 +3857,7 @@
   // src/core/AutoSkipPlugin.js
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "3.1.2";
+      this.version = "3.1.3";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";

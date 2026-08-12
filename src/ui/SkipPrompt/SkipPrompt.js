@@ -3,20 +3,23 @@ import { ProgressTimer } from './progressTimer.js';
 import { PromptController } from './controller.js';
 import { t as translate } from '../../util/i18n.js';
 
-const PANEL_SELECTORS = ['.player .player-panel__body', '.player .player-panel', '.player-panel__body', '.player-panel'];
+// Промпт монтируется в корень плеера, а НЕ в .player-panel: панель Lampa
+// автоскрывается по таймауту, и вместе с ней пропадала кнопка — при этом
+// отсчёт продолжался и пропуск срабатывал вслепую.
+const PLAYER_SELECTORS = ['.player', '.player-video', '#app .player'];
 
 function findMountTarget() {
   if (typeof document === 'undefined') return null;
-  for (const selector of PANEL_SELECTORS) {
+  for (const selector of PLAYER_SELECTORS) {
     const el = document.querySelector(selector);
     if (el) return el;
   }
-  return null;
+  return document.body || null;
 }
 
 function buildElement() {
   const root = document.createElement('div');
-  root.className = 'player-panel__skip-prompt autoskip-prompt';
+  root.className = 'autoskip-prompt';
 
   const cancel = document.createElement('div');
   cancel.className = 'simple-button selector autoskip-prompt__cancel';
@@ -26,6 +29,11 @@ function buildElement() {
 
   const skip = document.createElement('div');
   skip.className = 'simple-button selector autoskip-prompt__skip';
+
+  const progress = document.createElement('div');
+  progress.className = 'autoskip-prompt__progress';
+  skip.appendChild(progress);
+
   const labelWrap = document.createElement('span');
   labelWrap.className = 'autoskip-prompt__skip-label';
   const skipLabel = document.createElement('span');
@@ -36,10 +44,6 @@ function buildElement() {
   confidenceMark.style.display = 'none';
   labelWrap.appendChild(confidenceMark);
   skip.appendChild(labelWrap);
-
-  const progress = document.createElement('div');
-  progress.className = 'autoskip-prompt__progress';
-  skip.appendChild(progress);
 
   root.appendChild(cancel);
   root.appendChild(skip);
@@ -57,10 +61,11 @@ export class SkipPrompt {
     this.parts = null;
     this.controller = null;
     this.timer = null;
-    this._mountedAs = null;
     this._video = null;
     this._videoEvents = null;
     this._visible = false;
+    this._activeSegment = null;
+    this._activeConfidence = null;
   }
 
   attachToVideo(video) {
@@ -68,9 +73,9 @@ export class SkipPrompt {
     this._video = video;
     if (!video) return;
 
-    const onPause = () => { if (this.timer) this.timer.pause(); };
-    const onPlaying = () => { if (this.timer && this._visible) this.timer.resume(); };
-    const onSeeking = () => { if (this.timer) this.timer.reset(); };
+    const onPause = () => this._pauseCountdown();
+    const onPlaying = () => { if (this._visible) this._resumeCountdown(); };
+    const onSeeking = () => this._stopCountdown();
 
     video.addEventListener('pause', onPause);
     video.addEventListener('playing', onPlaying);
@@ -91,7 +96,7 @@ export class SkipPrompt {
 
   _ensure() {
     ensureSkipPromptStyles();
-    if (this.parts && document.body.contains(this.parts.root)) return this.parts;
+    if (this.parts && this.parts.root.isConnected) return this.parts;
 
     if (this.parts) {
       try { this.parts.root.remove(); } catch (e) { /* noop */ }
@@ -99,14 +104,12 @@ export class SkipPrompt {
 
     this.parts = buildElement();
     const target = findMountTarget();
-    if (target) {
-      target.appendChild(this.parts.root);
-      this._mountedAs = 'panel';
-    } else {
-      this.parts.root.classList.add('autoskip-prompt--standalone');
-      document.body.appendChild(this.parts.root);
-      this._mountedAs = 'standalone';
-    }
+    if (!target) return this.parts;
+    target.appendChild(this.parts.root);
+
+    // Форсируем расчёт стилей, иначе браузер схлопнет начальное и конечное
+    // состояние в один кадр и появление пройдёт без анимации.
+    void this.parts.root.offsetWidth;
 
     this.parts.cancel.addEventListener('click', () => this._handleCancel());
     this.parts.skip.addEventListener('click', () => this._handleSkip());
@@ -115,32 +118,32 @@ export class SkipPrompt {
 
   show(segment, options) {
     const parts = this._ensure();
+    if (!parts.root.isConnected) return;
+
     this._activeSegment = segment;
     const opts = options || {};
     const confidence = opts.confidence || 'high';
     this._activeConfidence = confidence;
     const autoSkipAllowed = opts.autoSkip !== false;
 
-    parts.root.classList.add('is-visible');
-    parts.root.classList.remove('autoskip-prompt--confidence-low', 'autoskip-prompt--confidence-medium', 'autoskip-prompt--confidence-high');
+    parts.root.classList.remove(
+      'autoskip-prompt--confidence-low',
+      'autoskip-prompt--confidence-medium',
+      'autoskip-prompt--confidence-high'
+    );
     parts.root.classList.add(`autoskip-prompt--confidence-${confidence}`);
 
     if (parts.confidenceMark) {
-      if (confidence === 'low') {
-        parts.confidenceMark.style.display = '';
-        parts.confidenceMark.textContent = '?';
-      } else if (confidence === 'medium') {
-        parts.confidenceMark.style.display = '';
-        parts.confidenceMark.textContent = '~';
-      } else {
-        parts.confidenceMark.style.display = 'none';
-        parts.confidenceMark.textContent = '';
-      }
+      const mark = confidence === 'low' ? '?' : (confidence === 'medium' ? '~' : '');
+      parts.confidenceMark.textContent = mark;
+      parts.confidenceMark.style.display = mark ? '' : 'none';
     }
 
     parts.cancel.classList.remove('focus');
     parts.skip.classList.add('focus');
-    parts.progress.style.transform = 'scaleX(0)';
+
+    parts.root.style.setProperty('--autoskip-progress-duration', `${this.durationMs}ms`);
+    parts.root.classList.add('is-visible');
 
     if (!this.controller) {
       this.controller = new PromptController({
@@ -151,50 +154,93 @@ export class SkipPrompt {
       });
     }
 
-    if (!this._visible) {
-      this.controller.takeover(parts.skip);
-    }
+    if (!this._visible) this.controller.takeover(parts.skip);
     this._visible = true;
 
-    if (autoSkipAllowed && confidence !== 'low') this._restartTimer();
-    else this._cancelTimer();
+    if (autoSkipAllowed && confidence !== 'low') this._startCountdown();
+    else this._stopCountdown();
   }
 
-  _cancelTimer() {
+  _startCountdown() {
+    this._stopCountdown();
+    if (!this.parts) return;
+    const { root } = this.parts;
+
+    // Перезапуск CSS-анимации: снять класс, форсировать reflow, вернуть.
+    root.classList.remove('is-counting', 'is-paused');
+    void root.offsetWidth;
+    root.classList.add('is-counting');
+
+    this.timer = new ProgressTimer({
+      duration: this.durationMs,
+      onDone: () => this._handleTimeout()
+    });
+    this.timer.start();
+
+    if (this._video && this._video.paused) this._pauseCountdown();
+  }
+
+  _pauseCountdown() {
+    if (!this.timer) return;
+    this.timer.pause();
+    if (this.parts) this.parts.root.classList.add('is-paused');
+  }
+
+  _resumeCountdown() {
+    if (!this.timer) return;
+    this.timer.resume();
+    if (this.parts && this.timer.isRunning()) this.parts.root.classList.remove('is-paused');
+  }
+
+  _stopCountdown() {
     if (this.timer) {
       this.timer.cancel();
       this.timer = null;
     }
+    if (this.parts) this.parts.root.classList.remove('is-counting', 'is-paused');
   }
 
-  _restartTimer() {
-    this._cancelTimer();
-    if (!this.parts) return;
-    const { progress } = this.parts;
-    this.timer = new ProgressTimer({
-      duration: this.durationMs,
-      onTick: (pct) => {
-        progress.style.transform = `scaleX(${pct})`;
-      },
-      onDone: () => this._handleSkip(true)
-    });
-    this.timer.start();
+  /**
+   * Автопропуск разрешён, только если промпт реально отрисован. Страховка от
+   * повторения бага, когда кнопка была скрыта, а пропуск всё равно срабатывал.
+   */
+  _isReallyVisible() {
+    if (!this.parts || !this.parts.root.isConnected) return false;
+    if (typeof window === 'undefined' || typeof window.getComputedStyle !== 'function') return true;
+
+    const root = this.parts.root;
+    const rect = root.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+
+    let node = root;
+    let depth = 0;
+    while (node && node !== document.documentElement && depth < 24) {
+      const cs = window.getComputedStyle(node);
+      if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+      if (Number(cs.opacity) < 0.05) return false;
+      node = node.parentElement;
+      depth += 1;
+    }
+    return true;
+  }
+
+  _handleTimeout() {
+    if (!this._isReallyVisible()) {
+      this.log('warn', 'auto-skip suppressed: prompt is not visible on screen.');
+      this._stopCountdown();
+      return;
+    }
+    this._handleSkip();
   }
 
   hide() {
-    if (this.timer) {
-      this.timer.cancel();
-      this.timer = null;
-    }
+    this._stopCountdown();
     if (this.parts) {
       this.parts.root.classList.remove('is-visible');
       this.parts.skip.classList.remove('focus');
       this.parts.cancel.classList.remove('focus');
-      this.parts.progress.style.transform = 'scaleX(0)';
     }
-    if (this.controller && this._visible) {
-      this.controller.release();
-    }
+    if (this.controller && this._visible) this.controller.release();
     this._visible = false;
     this._activeSegment = null;
   }
@@ -213,7 +259,7 @@ export class SkipPrompt {
     return this._visible;
   }
 
-  _handleSkip(/* fromTimer */) {
+  _handleSkip() {
     const segment = this._activeSegment;
     this.hide();
     try { this.onSkip(segment); } catch (e) { this.log('warn', 'onSkip threw', e); }
