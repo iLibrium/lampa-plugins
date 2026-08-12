@@ -254,6 +254,13 @@ export class AudioProvider extends ProviderBase {
 
   _handleSilenceProbe(rms) {
     if (this._silenceProbeRemaining <= 0) return;
+
+    // В фоновой вкладке AudioContext засыпает и ScriptProcessor отдаёт нули.
+    // Без этой проверки провайдер объявлял поток «тихим» и выключал себя
+    // навсегда — хотя доступ к звуку был, просто вкладка была свёрнута.
+    if (typeof document !== 'undefined' && document.hidden) return;
+    if (this.audioContext && this.audioContext.state !== 'running') return;
+
     this._silenceProbeRemaining -= 1;
     if (rms > this.config.silenceProbeRmsThreshold) {
       this._silenceProbeRemaining = 0;

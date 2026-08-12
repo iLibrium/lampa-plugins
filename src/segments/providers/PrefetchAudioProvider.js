@@ -66,7 +66,11 @@ export class PrefetchAudioProvider extends ProviderBase {
 
     const head = await this._head(src);
     if (this.cancelled) return;
-    if (!head || !head.acceptRanges || !head.contentLength || !head.isMp4) {
+    // На accept-ranges полагаться нельзя: CORS не отдаёт этот заголовок в JS,
+    // поэтому он всегда пуст на чужом origin и раньше глушил провайдер на
+    // источниках, которые диапазоны прекрасно поддерживают. Проверяем делом —
+    // по коду 206 на первый же запрос.
+    if (!head || !head.contentLength || !head.isMp4) {
       if (this.getSettings().debug) this.log('log', 'prefetch_audio: source not eligible', head);
       return;
     }
@@ -136,8 +140,10 @@ export class PrefetchAudioProvider extends ProviderBase {
       this.log('warn', 'prefetch_audio: range fetch failed', e && e.message ? e.message : e);
       return null;
     }
-    if (!response.ok && response.status !== 206) {
-      this.log('warn', `prefetch_audio: range ${start}-${end} HTTP ${response.status}`);
+    // Строго 206: на 200 сервер проигнорировал Range и собрался отдать файл
+    // целиком — на приставке это сотни мегабайт трафика впустую.
+    if (response.status !== 206) {
+      this.log('warn', `prefetch_audio: сервер ответил ${response.status} вместо 206 — диапазоны не поддерживаются, отказ.`);
       return null;
     }
     try {

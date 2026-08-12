@@ -1397,6 +1397,10 @@
     _handleSilenceProbe(rms) {
       if (this._silenceProbeRemaining <= 0)
         return;
+      if (typeof document !== "undefined" && document.hidden)
+        return;
+      if (this.audioContext && this.audioContext.state !== "running")
+        return;
       this._silenceProbeRemaining -= 1;
       if (rms > this.config.silenceProbeRmsThreshold) {
         this._silenceProbeRemaining = 0;
@@ -2693,7 +2697,7 @@
       const head = await this._head(src);
       if (this.cancelled)
         return;
-      if (!head || !head.acceptRanges || !head.contentLength || !head.isMp4) {
+      if (!head || !head.contentLength || !head.isMp4) {
         if (this.getSettings().debug)
           this.log("log", "prefetch_audio: source not eligible", head);
         return;
@@ -2768,8 +2772,8 @@
         this.log("warn", "prefetch_audio: range fetch failed", e && e.message ? e.message : e);
         return null;
       }
-      if (!response.ok && response.status !== 206) {
-        this.log("warn", `prefetch_audio: range ${start}-${end} HTTP ${response.status}`);
+      if (response.status !== 206) {
+        this.log("warn", `prefetch_audio: сервер ответил ${response.status} вместо 206 — диапазоны не поддерживаются, отказ.`);
         return null;
       }
       try {
@@ -3984,7 +3988,7 @@
   // src/core/AutoSkipPlugin.js
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "3.1.5";
+      this.version = "3.1.6";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";
