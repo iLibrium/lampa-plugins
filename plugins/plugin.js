@@ -1157,10 +1157,18 @@
   var DEFAULT_CONFIG = {
     windowSec: 0.5,
     baselineWindows: 30,
+    // Доля разрыва, на которую база подтягивается вверх за одно окно (0.5 с).
+    // За 90 секунд заставки база успевает вырасти примерно на десятую часть
+    // разрыва, за десять минут действительно более громкого материала — вдвое.
+    baselineRiseRate: 6e-4,
     warmupWindows: 24,
     zThreshold: 1.4,
     minSegmentSec: 5,
     mergeGapSec: 3,
+    // Насколько сегмент должен отстать от разобранного хвоста, чтобы считаться
+    // закрытым. Строго больше mergeGapSec — иначе следующая вспышка всё равно
+    // приклеится к уже отданному сегменту.
+    segmentSettleSec: 4,
     introMaxFraction: 0.3,
     introMinStartSec: 20,
     introMinDurationSec: 25,
@@ -1182,6 +1190,13 @@
       return 0;
     const idx = Math.round(freqHz / (sampleRate / 2) * binCount);
     return Math.max(0, Math.min(binCount - 1, idx));
+  }
+  function computeMad(values, median) {
+    const mad = computeMedian(values.map((v) => Math.abs(v - median)));
+    if (Number.isFinite(mad) && mad >= 1e-7)
+      return mad;
+    const variance = values.reduce((s, v) => s + (v - median) * (v - median), 0) / Math.max(values.length, 1);
+    return Math.sqrt(Math.max(variance, 0)) / 1.4826 || 1e-6;
   }
   var AudioProvider = class extends ProviderBase {
     constructor({ log, config = {}, onUpdate, onTainted }) {
@@ -1248,6 +1263,7 @@
         currentSumSq: 0,
         currentSamples: 0,
         windows: [],
+        baseline: null,
         windowSamples: Math.max(1, Math.floor(this.config.windowSec * this.audioContext.sampleRate))
       };
       this._lastEmitted = null;
@@ -1347,18 +1363,23 @@
       this.state.currentSamples = 0;
       this.state.currentSumSq = 0;
     }
-    resetSession() {
-      if (!this.state)
-        return;
-      this.state.currentSamples = 0;
-      this.state.currentSumSq = 0;
-      this.state.windows = [];
-      this._lastEmitted = null;
-      this._silenceProbeRemaining = this.config.silenceProbeWindows;
+    // Свёрнутая вкладка усыпляет AudioContext: ScriptProcessor отдаёт нули или
+    // молчит вовсе, а video.currentTime продолжает идти. Всё, что посчитано в
+    // этом состоянии, — мусор, и раньше он давал ложный вердикт «тишина».
+    _isBackgrounded() {
+      if (typeof document !== "undefined" && document.hidden)
+        return true;
+      if (this.audioContext && this.audioContext.state !== "running")
+        return true;
+      return false;
     }
     _handleProcess(event) {
       if (!this.state || !this.video)
         return;
+      if (this._isBackgrounded()) {
+        this.resetWindowAccumulator();
+        return;
+      }
       const inputBuffer = event.inputBuffer;
       if (!inputBuffer)
         return;
@@ -1397,9 +1418,7 @@
     _handleSilenceProbe(rms) {
       if (this._silenceProbeRemaining <= 0)
         return;
-      if (typeof document !== "undefined" && document.hidden)
-        return;
-      if (this.audioContext && this.audioContext.state !== "running")
+      if (this._isBackgrounded())
         return;
       this._silenceProbeRemaining -= 1;
       if (rms > this.config.silenceProbeRmsThreshold) {
@@ -1460,6 +1479,34 @@
         this.state.windows.splice(0, excess);
       }
     }
+    // База должна отражать обычный уровень дорожки, а не последние пятнадцать
+    // секунд. Скользящее окно уезжало вверх вместе с заставкой: в живых логах
+    // медиана шла 0.034 -> 0.054, порог 0.029 -> 0.080, и музыка переставала
+    // быть выбросом относительно самой себя. Поэтому вниз опора переставляется
+    // сразу и целиком — более тихий материал всегда достовернее как эталон, —
+    // а вверх ползёт по доле разрыва за окно. Разброс берём только у тихого
+    // материала: громкий кусок ничего не говорит о том, как колеблется фон.
+    _trackBaseline(windows) {
+      const size = Math.min(this.config.baselineWindows, windows.length);
+      const values = windows.slice(-size).map((w) => w.rms);
+      const candMedian = Math.max(computeMedian(values), this.config.minBaselineRms);
+      const prev = this.state.baseline;
+      if (!prev) {
+        this.state.baseline = { median: candMedian, mad: computeMad(values, candMedian), size };
+        return this.state.baseline;
+      }
+      if (candMedian <= prev.median) {
+        this.state.baseline = { median: candMedian, mad: computeMad(values, candMedian), size };
+        return this.state.baseline;
+      }
+      const median = prev.median + (candMedian - prev.median) * this.config.baselineRiseRate;
+      this.state.baseline = {
+        median: Math.max(median, this.config.minBaselineRms),
+        mad: prev.mad,
+        size
+      };
+      return this.state.baseline;
+    }
     _updateSegments() {
       if (!this.state || !this.video)
         return;
@@ -1473,16 +1520,7 @@
         this._maybeLogProgress({ phase: "warmup", windows: windows.length });
         return;
       }
-      const baselineSize = Math.min(this.config.baselineWindows, windows.length);
-      const baselineSlice = windows.slice(-baselineSize);
-      const values = baselineSlice.map((w) => w.rms);
-      const rawMedian = computeMedian(values);
-      const median = Math.max(rawMedian, this.config.minBaselineRms);
-      let mad = computeMedian(values.map((v) => Math.abs(v - median)));
-      if (!Number.isFinite(mad) || mad < 1e-7) {
-        const variance = values.reduce((s, v) => s + (v - median) * (v - median), 0) / Math.max(values.length, 1);
-        mad = Math.sqrt(Math.max(variance, 0)) / 1.4826 || 1e-6;
-      }
+      const { median, mad, size: baselineSize } = this._trackBaseline(windows);
       const thresh = Math.max(this.config.zThreshold * mad * 1.4826, this.config.minThreshold);
       const flagged = [];
       for (let i = 0; i < windows.length; i += 1) {
@@ -1494,14 +1532,17 @@
           flagged.push({ start: w.start, end: w.end });
       }
       const merged = mergeSegments(flagged, this.config.mergeGapSec);
-      const filtered = merged.filter((seg) => seg.end - seg.start >= this.config.minSegmentSec);
+      const sized = merged.filter((seg) => seg.end - seg.start >= this.config.minSegmentSec);
+      const analysedUpTo = windows[windows.length - 1].end;
+      const filtered = sized.filter((seg) => analysedUpTo - seg.end >= this.config.segmentSettleSec);
       this._maybeLogProgress({
         phase: "analysing",
         windows: windows.length,
         median,
         threshold: thresh,
         flagged: flagged.length,
-        candidates: filtered.length
+        candidates: sized.length,
+        settled: filtered.length
       });
       if (!filtered.length)
         return;
@@ -4006,12 +4047,14 @@
   // src/core/AutoSkipPlugin.js
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "3.1.7";
+      this.version = "3.1.8";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";
       this.log = createLogger({ tag: this.logTag });
       this.capabilities = probe();
+      this._visibilityResumeCount = 0;
+      this._visibilityResumeLoggedAt = 0;
       this.settingsStore = new SettingsStore({ log: this.log });
       this.settings = Object.assign({}, SETTINGS_DEFAULTS, this.settingsStore.load());
       this.settingsStore.update(this.settings);
@@ -4060,9 +4103,8 @@
         log: this.log,
         onResume: () => {
           if (this.audioProvider)
-            this.audioProvider.resetSession();
-          if (this.settings.debug)
-            this.log("log", "audio buffer reset on visibility resume");
+            this.audioProvider.resetWindowAccumulator();
+          this._noteVisibilityResume();
         }
       });
       this.skipPrompt = new SkipPrompt({
@@ -4162,6 +4204,22 @@
     stop() {
       this.isRunning = false;
       this.log("log", "auto-skip stopped.");
+    }
+    // Видимость может дёргаться десятками раз подряд, и построчный лог тогда
+    // вытесняет из консоли всю содержательную диагностику. Пишем не чаще раза
+    // в десять секунд, накопленные срабатывания схлопываем в счётчик.
+    _noteVisibilityResume() {
+      if (!this.settings.debug)
+        return;
+      this._visibilityResumeCount += 1;
+      const now = Date.now();
+      if (now - this._visibilityResumeLoggedAt < 1e4)
+        return;
+      this._visibilityResumeLoggedAt = now;
+      const count = this._visibilityResumeCount;
+      this._visibilityResumeCount = 0;
+      const suffix = count > 1 ? ` (x${count})` : "";
+      this.log("log", `audio window accumulator reset on visibility resume${suffix}`);
     }
     onPlayerStart() {
       if (!this.settings.enabled)

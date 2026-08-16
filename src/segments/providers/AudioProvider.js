@@ -5,10 +5,18 @@ import { describeMediaAccess } from '../../playback/mediaAccess.js';
 const DEFAULT_CONFIG = {
   windowSec: 0.5,
   baselineWindows: 30,
+  // Доля разрыва, на которую база подтягивается вверх за одно окно (0.5 с).
+  // За 90 секунд заставки база успевает вырасти примерно на десятую часть
+  // разрыва, за десять минут действительно более громкого материала — вдвое.
+  baselineRiseRate: 0.0006,
   warmupWindows: 24,
   zThreshold: 1.4,
   minSegmentSec: 5,
   mergeGapSec: 3,
+  // Насколько сегмент должен отстать от разобранного хвоста, чтобы считаться
+  // закрытым. Строго больше mergeGapSec — иначе следующая вспышка всё равно
+  // приклеится к уже отданному сегменту.
+  segmentSettleSec: 4,
   introMaxFraction: 0.3,
   introMinStartSec: 20,
   introMinDurationSec: 25,
@@ -31,6 +39,13 @@ function clampFreqIndex(freqHz, sampleRate, binCount) {
   if (!Number.isFinite(freqHz) || sampleRate <= 0 || binCount <= 0) return 0;
   const idx = Math.round((freqHz / (sampleRate / 2)) * binCount);
   return Math.max(0, Math.min(binCount - 1, idx));
+}
+
+function computeMad(values, median) {
+  const mad = computeMedian(values.map((v) => Math.abs(v - median)));
+  if (Number.isFinite(mad) && mad >= 1e-7) return mad;
+  const variance = values.reduce((s, v) => s + (v - median) * (v - median), 0) / Math.max(values.length, 1);
+  return Math.sqrt(Math.max(variance, 0)) / 1.4826 || 1e-6;
 }
 
 export class AudioProvider extends ProviderBase {
@@ -105,6 +120,7 @@ export class AudioProvider extends ProviderBase {
       currentSumSq: 0,
       currentSamples: 0,
       windows: [],
+      baseline: null,
       windowSamples: Math.max(1, Math.floor(this.config.windowSec * this.audioContext.sampleRate))
     };
     this._lastEmitted = null;
@@ -204,17 +220,21 @@ export class AudioProvider extends ProviderBase {
     this.state.currentSumSq = 0;
   }
 
-  resetSession() {
-    if (!this.state) return;
-    this.state.currentSamples = 0;
-    this.state.currentSumSq = 0;
-    this.state.windows = [];
-    this._lastEmitted = null;
-    this._silenceProbeRemaining = this.config.silenceProbeWindows;
+  // Свёрнутая вкладка усыпляет AudioContext: ScriptProcessor отдаёт нули или
+  // молчит вовсе, а video.currentTime продолжает идти. Всё, что посчитано в
+  // этом состоянии, — мусор, и раньше он давал ложный вердикт «тишина».
+  _isBackgrounded() {
+    if (typeof document !== 'undefined' && document.hidden) return true;
+    if (this.audioContext && this.audioContext.state !== 'running') return true;
+    return false;
   }
 
   _handleProcess(event) {
     if (!this.state || !this.video) return;
+    if (this._isBackgrounded()) {
+      this.resetWindowAccumulator();
+      return;
+    }
     const inputBuffer = event.inputBuffer;
     if (!inputBuffer) return;
 
@@ -254,12 +274,7 @@ export class AudioProvider extends ProviderBase {
 
   _handleSilenceProbe(rms) {
     if (this._silenceProbeRemaining <= 0) return;
-
-    // В фоновой вкладке AudioContext засыпает и ScriptProcessor отдаёт нули.
-    // Без этой проверки провайдер объявлял поток «тихим» и выключал себя
-    // навсегда — хотя доступ к звуку был, просто вкладка была свёрнута.
-    if (typeof document !== 'undefined' && document.hidden) return;
-    if (this.audioContext && this.audioContext.state !== 'running') return;
+    if (this._isBackgrounded()) return;
 
     this._silenceProbeRemaining -= 1;
     if (rms > this.config.silenceProbeRmsThreshold) {
@@ -317,6 +332,38 @@ export class AudioProvider extends ProviderBase {
     }
   }
 
+  // База должна отражать обычный уровень дорожки, а не последние пятнадцать
+  // секунд. Скользящее окно уезжало вверх вместе с заставкой: в живых логах
+  // медиана шла 0.034 -> 0.054, порог 0.029 -> 0.080, и музыка переставала
+  // быть выбросом относительно самой себя. Поэтому вниз опора переставляется
+  // сразу и целиком — более тихий материал всегда достовернее как эталон, —
+  // а вверх ползёт по доле разрыва за окно. Разброс берём только у тихого
+  // материала: громкий кусок ничего не говорит о том, как колеблется фон.
+  _trackBaseline(windows) {
+    const size = Math.min(this.config.baselineWindows, windows.length);
+    const values = windows.slice(-size).map((w) => w.rms);
+    const candMedian = Math.max(computeMedian(values), this.config.minBaselineRms);
+    const prev = this.state.baseline;
+
+    if (!prev) {
+      this.state.baseline = { median: candMedian, mad: computeMad(values, candMedian), size };
+      return this.state.baseline;
+    }
+
+    if (candMedian <= prev.median) {
+      this.state.baseline = { median: candMedian, mad: computeMad(values, candMedian), size };
+      return this.state.baseline;
+    }
+
+    const median = prev.median + (candMedian - prev.median) * this.config.baselineRiseRate;
+    this.state.baseline = {
+      median: Math.max(median, this.config.minBaselineRms),
+      mad: prev.mad,
+      size
+    };
+    return this.state.baseline;
+  }
+
   _updateSegments() {
     if (!this.state || !this.video) return;
     const duration = this.video.duration;
@@ -328,16 +375,7 @@ export class AudioProvider extends ProviderBase {
       return;
     }
 
-    const baselineSize = Math.min(this.config.baselineWindows, windows.length);
-    const baselineSlice = windows.slice(-baselineSize);
-    const values = baselineSlice.map((w) => w.rms);
-    const rawMedian = computeMedian(values);
-    const median = Math.max(rawMedian, this.config.minBaselineRms);
-    let mad = computeMedian(values.map((v) => Math.abs(v - median)));
-    if (!Number.isFinite(mad) || mad < 1e-7) {
-      const variance = values.reduce((s, v) => s + (v - median) * (v - median), 0) / Math.max(values.length, 1);
-      mad = Math.sqrt(Math.max(variance, 0)) / 1.4826 || 1e-6;
-    }
+    const { median, mad, size: baselineSize } = this._trackBaseline(windows);
 
     const thresh = Math.max(this.config.zThreshold * mad * 1.4826, this.config.minThreshold);
     const flagged = [];
@@ -350,14 +388,22 @@ export class AudioProvider extends ProviderBase {
     }
 
     const merged = mergeSegments(flagged, this.config.mergeGapSec);
-    const filtered = merged.filter((seg) => (seg.end - seg.start) >= this.config.minSegmentSec);
+    const sized = merged.filter((seg) => (seg.end - seg.start) >= this.config.minSegmentSec);
+
+    // Пока громкий кусок продолжается, его конец совпадает с позицией зрителя,
+    // и «пропустить» вело бы ровно туда, где он уже стоит. Отдаём сегмент
+    // только после того, как он закрылся и его границы перестали ползти.
+    const analysedUpTo = windows[windows.length - 1].end;
+    const filtered = sized.filter((seg) => analysedUpTo - seg.end >= this.config.segmentSettleSec);
+
     this._maybeLogProgress({
       phase: 'analysing',
       windows: windows.length,
       median,
       threshold: thresh,
       flagged: flagged.length,
-      candidates: filtered.length
+      candidates: sized.length,
+      settled: filtered.length
     });
     if (!filtered.length) return;
 

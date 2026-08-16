@@ -25,13 +25,16 @@ import { t as translate, registerTranslations } from '../util/i18n.js';
 
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '3.1.7';
+    this.version = '3.1.8';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';
     this.log = createLogger({ tag: this.logTag });
 
     this.capabilities = probeCapabilities();
+
+    this._visibilityResumeCount = 0;
+    this._visibilityResumeLoggedAt = 0;
 
     this.settingsStore = new SettingsStore({ log: this.log });
     this.settings = Object.assign({}, SETTINGS_DEFAULTS, this.settingsStore.load());
@@ -83,8 +86,11 @@ export class AutoSkipPlugin {
     this.visibilityGuard = new VisibilityGuard({
       log: this.log,
       onResume: () => {
-        if (this.audioProvider) this.audioProvider.resetSession();
-        if (this.settings.debug) this.log('log', 'audio buffer reset on visibility resume');
+        // Историю окон не выбрасываем: она про содержимое, а не про вкладку,
+        // и в свёрнутом состоянии в неё уже ничего не писалось. Сбрасываем
+        // только недосчитанное окно — на нём разрыв времени.
+        if (this.audioProvider) this.audioProvider.resetWindowAccumulator();
+        this._noteVisibilityResume();
       }
     });
 
@@ -192,6 +198,21 @@ export class AutoSkipPlugin {
   stop() {
     this.isRunning = false;
     this.log('log', 'auto-skip stopped.');
+  }
+
+  // Видимость может дёргаться десятками раз подряд, и построчный лог тогда
+  // вытесняет из консоли всю содержательную диагностику. Пишем не чаще раза
+  // в десять секунд, накопленные срабатывания схлопываем в счётчик.
+  _noteVisibilityResume() {
+    if (!this.settings.debug) return;
+    this._visibilityResumeCount += 1;
+    const now = Date.now();
+    if (now - this._visibilityResumeLoggedAt < 10000) return;
+    this._visibilityResumeLoggedAt = now;
+    const count = this._visibilityResumeCount;
+    this._visibilityResumeCount = 0;
+    const suffix = count > 1 ? ` (x${count})` : '';
+    this.log('log', `audio window accumulator reset on visibility resume${suffix}`);
   }
 
   onPlayerStart() {
