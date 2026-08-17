@@ -4,7 +4,10 @@ import { computeMedian } from '../ranges.js';
 const MUSIC_MARKERS = /[♪♫♬♩]|\[(music|opening|theme|song|musical|opening theme|theme song|intro)\]|\((music|theme|opening|musical|opening theme|theme song)\)|♪|♫|♬|♩/i;
 const RECAP_MARKERS = /\bpreviously on\b|ранее в|в предыдущ|в прошлы(й|х) сери/i;
 const CREDITS_MARKERS_EN = /\b(directed by|created by|written by|produced by|executive producer|cast|music by|edited by|editor|cinematography|director of photography|costumes by|production designer|original music)\b/i;
-const CREDITS_MARKERS_RU = /\b(режиссёр|режиссер|сценар|продюсер|оператор|композитор|производство|в ролях|монтаж)\b/iu;
+// Граница слова \b в JavaScript определена через ASCII-класс \w, поэтому перед
+// кириллицей она не срабатывает никогда — даже под флагом u. С прежним \b(…)\b
+// ни один русский маркер титров не мог совпасть в принципе.
+const CREDITS_MARKERS_RU = /(?:^|[^\p{L}])(режиссёр|режиссер|сценар|продюсер|оператор|композитор|производство|в ролях|монтаж)/iu;
 
 const COLLECTION_RETRIES = 12;
 const COLLECTION_INTERVAL_MS = 600;
@@ -30,6 +33,44 @@ const MAX_LEADING_GAP_INTRO_SEC = 130;
 // разрежённые субтитры дадут ложное срабатывание на любой тихой сцене.
 const GAP_MEDIAN_RATIO = 4;
 const MIN_CUES_FOR_GAP = 3;
+
+// Реплики с маркерами разбросаны по всей серии: «♪» стоит и у заставки, и у
+// песни в середине, «продюсер» встречается и в диалоге. Схлопывать их в один
+// диапазон нельзя — min..max давал бы пропуск на пол-эпизода, причём с правом
+// на автопропуск. Поэтому совпадения сначала собираются в кластеры подряд
+// идущих реплик, и выбор идёт между кластерами.
+const MUSIC_CLUSTER_GAP_SEC = 12;
+const RECAP_CLUSTER_GAP_SEC = 15;
+const CREDITS_CLUSTER_GAP_SEC = 40;
+// Титры обязаны доходить до конца серии, иначе это просто разговор про кино.
+const CREDITS_TAIL_TOLERANCE_SEC = 90;
+const CREDITS_LONE_CUE_TAIL_FRACTION = 0.85;
+
+function clusterCues(cues, maxGapSec) {
+  const sorted = cues.slice().sort((a, b) => a.start - b.start);
+  const clusters = [];
+  for (const cue of sorted) {
+    const last = clusters[clusters.length - 1];
+    if (last && cue.start - last.end <= maxGapSec) {
+      last.end = Math.max(last.end, cue.end);
+      last.count += 1;
+    } else {
+      clusters.push({ start: cue.start, end: cue.end, count: 1 });
+    }
+  }
+  return clusters;
+}
+
+function longestCluster(clusters) {
+  if (!clusters.length) return null;
+  return clusters.reduce((best, c) => {
+    const len = c.end - c.start;
+    const bestLen = best.end - best.start;
+    if (len > bestLen) return c;
+    if (len === bestLen && c.start < best.start) return c;
+    return best;
+  });
+}
 
 function getLampaPlayerListener() {
   if (typeof Lampa === 'undefined') return null;
@@ -222,21 +263,29 @@ export class SubtitleProvider extends ProviderBase {
 
     const introMusic = cues.filter((c) => c.start <= introZone && MUSIC_MARKERS.test(c.text));
     if (introMusic.length) {
-      const start = Math.min.apply(null, introMusic.map((c) => c.start));
-      const end = Math.max.apply(null, introMusic.map((c) => c.end));
-      if (end - start >= MIN_INTRO_LEN_SEC) {
-        ranges.intro.push({ start, end });
+      const inZone = clusterCues(introMusic, MUSIC_CLUSTER_GAP_SEC)
+        // Заставка стоит в начале серии. Кластер «♪» на четвёртой минуте —
+        // это песня в кадре, и пропускать её никто не просил.
+        .filter((c) => c.start <= Math.min(introZone, MAX_INTRO_START_SEC))
+        .filter((c) => (c.end - c.start) >= MIN_INTRO_LEN_SEC);
+      const best = longestCluster(inZone);
+      if (best) {
+        ranges.intro.push({ start: best.start, end: best.end });
         strategy.intro = 'music-markers';
       }
     }
 
     if (!ranges.intro.length) {
-      const recap = cues.filter((c) => c.start <= introZone && RECAP_MARKERS.test(c.text));
-      if (recap.length) {
-        const start = Math.min.apply(null, recap.map((c) => c.start));
-        const end = Math.max.apply(null, recap.map((c) => c.end));
-        if (end - start >= MIN_RECAP_LEN_SEC) {
-          ranges.intro.push({ start, end });
+      // Рекап — плотный блок реплик, начинающийся с маркера: сам маркер это
+      // одна короткая строка, границей служит первый заметный перерыв.
+      const recapMarker = cues
+        .filter((c) => c.start <= introZone && RECAP_MARKERS.test(c.text))
+        .sort((a, b) => a.start - b.start)[0];
+      if (recapMarker) {
+        const fromMarker = cues.filter((c) => c.start >= recapMarker.start && c.start <= introZone);
+        const block = clusterCues(fromMarker, RECAP_CLUSTER_GAP_SEC)[0];
+        if (block && (block.end - block.start) >= MIN_RECAP_LEN_SEC) {
+          ranges.intro.push({ start: block.start, end: block.end });
           strategy.intro = 'recap-markers';
         }
       }
@@ -251,9 +300,18 @@ export class SubtitleProvider extends ProviderBase {
     }
 
     const creditsCue = cues.filter((c) => c.start >= creditsZone && (CREDITS_MARKERS_EN.test(c.text) || CREDITS_MARKERS_RU.test(c.text)));
-    if (creditsCue.length) {
-      const start = Math.min.apply(null, creditsCue.map((c) => c.start));
-      ranges.credits.push({ start, end: duration });
+    const creditsBlock = creditsCue.length
+      ? clusterCues(creditsCue, CREDITS_CLUSTER_GAP_SEC)
+        // Настоящие титры тянутся до конца файла. Одинокое «продюсер»,
+        // сказанное в диалоге на 71-й минуте, титрами не является — иначе
+        // пропуск съел бы почти треть серии.
+        .filter((c) => (duration - c.end) <= CREDITS_TAIL_TOLERANCE_SEC)
+        .filter((c) => c.count > 1 || c.start >= duration * CREDITS_LONE_CUE_TAIL_FRACTION)
+        .sort((a, b) => a.start - b.start)[0]
+      : null;
+
+    if (creditsBlock) {
+      ranges.credits.push({ start: creditsBlock.start, end: duration });
       strategy.credits = 'credits-markers';
     } else {
       const lastBody = cues.filter((c) => c.end < creditsZone).pop();
