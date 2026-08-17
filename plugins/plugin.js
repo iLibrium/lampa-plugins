@@ -878,18 +878,22 @@
     audio: 1,
     visual: 2,
     prefetch_audio: 3,
-    subtitle_gap: 4,
-    subtitle: 5,
-    chapters: 6,
-    metadata: 7,
-    theintrodb: 8,
-    aniskip: 9
+    lookahead_audio: 4,
+    subtitle_gap: 5,
+    subtitle: 6,
+    chapters: 7,
+    metadata: 8,
+    theintrodb: 9,
+    aniskip: 10
   };
   var SOURCE_CONFIDENCE = {
     cache: "medium",
     audio: "low",
     visual: "medium",
     prefetch_audio: "medium",
+    // Настоящий звук потока, разобранный до того, как зритель до него дошёл.
+    // Надёжнее prefetch: данные не обрезаны и принадлежат именно этой дорожке.
+    lookahead_audio: "medium",
     // Провал реплик — догадка: так же выглядит долгая тихая сцена. Показываем
     // кнопку, но автопропуск не разрешаем, пока догадку не подтвердит кто-то ещё.
     subtitle_gap: "low",
@@ -2990,6 +2994,506 @@
     }
   };
 
+  // src/playback/fmp4.js
+  var CONTAINERS = ["moov", "trak", "mdia", "minf", "stbl", "moof", "traf"];
+  var MAX_DEPTH = 6;
+  function typeAt(u8, p) {
+    return String.fromCharCode(u8[p + 4], u8[p + 5], u8[p + 6], u8[p + 7]);
+  }
+  function findBox(u8, want, start = 0, end = u8.length, depth = 0) {
+    let p = start;
+    while (p + 8 <= end) {
+      const size = (u8[p] << 24 | u8[p + 1] << 16 | u8[p + 2] << 8 | u8[p + 3]) >>> 0;
+      const type = typeAt(u8, p);
+      if (size < 8 || p + size > end)
+        return null;
+      if (type === want)
+        return { at: p, size };
+      if (CONTAINERS.indexOf(type) !== -1 && depth < MAX_DEPTH) {
+        const inner = findBox(u8, want, p + 8, p + size, depth + 1);
+        if (inner)
+          return inner;
+      }
+      p += size;
+    }
+    return null;
+  }
+  function firstBoxType(u8) {
+    if (!u8 || u8.length < 8)
+      return null;
+    const t2 = typeAt(u8, 0);
+    return /^[a-zA-Z0-9]{4}$/.test(t2) ? t2 : null;
+  }
+  function isInitSegment(u8) {
+    const t2 = firstBoxType(u8);
+    return t2 === "ftyp" || t2 === "styp" || t2 === "moov";
+  }
+  function isMediaSegment(u8) {
+    return firstBoxType(u8) === "moof";
+  }
+  function readTimescale(init) {
+    const box = findBox(init, "mdhd");
+    if (!box)
+      return null;
+    const version = init[box.at + 8];
+    const offset = box.at + 8 + (version === 1 ? 20 : 12);
+    if (offset + 4 > init.length)
+      return null;
+    const view = new DataView(init.buffer, init.byteOffset, init.byteLength);
+    const value = view.getUint32(offset);
+    return value > 0 ? value : null;
+  }
+  function readBaseMediaDecodeTime(media) {
+    const box = findBox(media, "tfdt");
+    if (!box)
+      return null;
+    const version = media[box.at + 8];
+    const view = new DataView(media.buffer, media.byteOffset, media.byteLength);
+    try {
+      if (version === 1) {
+        if (box.at + 20 > media.length)
+          return null;
+        return Number(view.getBigUint64(box.at + 12));
+      }
+      if (box.at + 16 > media.length)
+        return null;
+      return view.getUint32(box.at + 12);
+    } catch (e) {
+      return null;
+    }
+  }
+  function segmentStartSec(media, timescale) {
+    if (!timescale)
+      return null;
+    const base = readBaseMediaDecodeTime(media);
+    if (base === null || !Number.isFinite(base))
+      return null;
+    return base / timescale;
+  }
+
+  // src/playback/mseTap.js
+  var TAP_FLAG = "__autoskipTap";
+  var MseTap = class {
+    constructor({ log, wantsMore, onSegment, maxBytes = 24 * 1024 * 1024 } = {}) {
+      this.log = log || (() => {
+      });
+      this.wantsMore = wantsMore || (() => false);
+      this.onSegment = onSegment || (() => {
+      });
+      this.maxBytes = maxBytes;
+      this._installed = false;
+      this._origAppend = null;
+      this._origAddSourceBuffer = null;
+      this._init = null;
+      this._bytes = 0;
+      this._seenAudioBuffer = false;
+    }
+    isInstalled() {
+      return this._installed;
+    }
+    hasInitSegment() {
+      return !!this._init;
+    }
+    getInitSegment() {
+      return this._init;
+    }
+    sawAudioBuffer() {
+      return this._seenAudioBuffer;
+    }
+    install() {
+      if (this._installed)
+        return true;
+      if (typeof window === "undefined")
+        return false;
+      const SB = window.SourceBuffer;
+      const MS = window.MediaSource;
+      if (!SB || !SB.prototype || !SB.prototype.appendBuffer)
+        return false;
+      if (!MS || !MS.prototype || !MS.prototype.addSourceBuffer)
+        return false;
+      if (SB.prototype.appendBuffer[TAP_FLAG])
+        return false;
+      const self = this;
+      this._origAppend = SB.prototype.appendBuffer;
+      this._origAddSourceBuffer = MS.prototype.addSourceBuffer;
+      const addOrig = this._origAddSourceBuffer;
+      const patchedAdd = function(mime) {
+        const sb = addOrig.apply(this, arguments);
+        try {
+          if (sb)
+            sb.__autoskipMime = String(mime || "");
+        } catch (e) {
+        }
+        return sb;
+      };
+      patchedAdd[TAP_FLAG] = true;
+      const appendOrig = this._origAppend;
+      const patchedAppend = function(data) {
+        try {
+          self._observe(this, data);
+        } catch (e) {
+        }
+        return appendOrig.apply(this, arguments);
+      };
+      patchedAppend[TAP_FLAG] = true;
+      MS.prototype.addSourceBuffer = patchedAdd;
+      SB.prototype.appendBuffer = patchedAppend;
+      this._installed = true;
+      return true;
+    }
+    uninstall() {
+      if (!this._installed)
+        return;
+      try {
+        if (window.SourceBuffer.prototype.appendBuffer[TAP_FLAG]) {
+          window.SourceBuffer.prototype.appendBuffer = this._origAppend;
+        }
+        if (window.MediaSource.prototype.addSourceBuffer[TAP_FLAG]) {
+          window.MediaSource.prototype.addSourceBuffer = this._origAddSourceBuffer;
+        }
+      } catch (e) {
+      }
+      this._installed = false;
+      this._origAppend = null;
+      this._origAddSourceBuffer = null;
+      this._init = null;
+      this._bytes = 0;
+    }
+    _observe(sourceBuffer, data) {
+      const mime = sourceBuffer && sourceBuffer.__autoskipMime || "";
+      if (mime.indexOf("audio") !== 0)
+        return;
+      this._seenAudioBuffer = true;
+      const needInit = !this._init;
+      if (!needInit && !this.wantsMore())
+        return;
+      if (this._bytes >= this.maxBytes)
+        return;
+      const view = toUint8(data);
+      if (!view || !view.length)
+        return;
+      if (isInitSegment(view)) {
+        if (needInit)
+          this._init = view.slice(0);
+        return;
+      }
+      if (!needInit && isMediaSegment(view)) {
+        const copy = view.slice(0);
+        this._bytes += copy.length;
+        this.onSegment(copy, mime);
+      }
+    }
+  };
+  function toUint8(data) {
+    if (!data)
+      return null;
+    if (data instanceof Uint8Array)
+      return data;
+    if (typeof ArrayBuffer !== "undefined" && data instanceof ArrayBuffer)
+      return new Uint8Array(data);
+    if (data.buffer instanceof ArrayBuffer)
+      return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    return null;
+  }
+
+  // src/segments/providers/LookaheadAudioProvider.js
+  var WINDOW_SEC = 0.5;
+  var MIN_ANALYSIS_SEC = 40;
+  var MERGE_GAP_SEC2 = 3;
+  var ABS_RMS_FLOOR2 = 0.04;
+  var MIN_CLASS_SEPARATION = 0.015;
+  var MAX_QUIET_FRACTION = 0.2;
+  var INTRO_MIN_START_SEC2 = 20;
+  var INTRO_MIN_DURATION_SEC2 = 25;
+  var INTRO_MAX_FRACTION2 = 0.3;
+  var MAX_LOOKAHEAD_SEC = 300;
+  var HISTOGRAM_BINS = 64;
+  function otsuThreshold(values, bins = HISTOGRAM_BINS) {
+    if (values.length < 2)
+      return null;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const v of values) {
+      if (v < lo)
+        lo = v;
+      if (v > hi)
+        hi = v;
+    }
+    if (!(hi > lo))
+      return null;
+    const hist = new Array(bins).fill(0);
+    const width = (hi - lo) / bins;
+    for (const v of values) {
+      let idx = Math.floor((v - lo) / width);
+      if (idx >= bins)
+        idx = bins - 1;
+      if (idx < 0)
+        idx = 0;
+      hist[idx] += 1;
+    }
+    const total = values.length;
+    let sumAll = 0;
+    for (let i = 0; i < bins; i += 1)
+      sumAll += (lo + (i + 0.5) * width) * hist[i];
+    let sumLow = 0;
+    let countLow = 0;
+    let best = -1;
+    let bestIdx = -1;
+    for (let i = 0; i < bins - 1; i += 1) {
+      countLow += hist[i];
+      if (!countLow)
+        continue;
+      const countHigh = total - countLow;
+      if (!countHigh)
+        break;
+      sumLow += (lo + (i + 0.5) * width) * hist[i];
+      const meanLow = sumLow / countLow;
+      const meanHigh = (sumAll - sumLow) / countHigh;
+      const between = countLow * countHigh * (meanHigh - meanLow) * (meanHigh - meanLow);
+      if (between > best) {
+        best = between;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0)
+      return null;
+    const threshold = lo + (bestIdx + 1) * width;
+    let sl = 0;
+    let cl = 0;
+    let sh = 0;
+    let ch = 0;
+    for (const v of values) {
+      if (v <= threshold) {
+        sl += v;
+        cl += 1;
+      } else {
+        sh += v;
+        ch += 1;
+      }
+    }
+    if (!cl || !ch)
+      return null;
+    return { threshold, meanQuiet: sl / cl, meanLoud: sh / ch };
+  }
+  var LookaheadAudioProvider = class extends ProviderBase {
+    constructor({ log, getSettings, onUpdate }) {
+      super({ name: "lookahead_audio", log });
+      this.getSettings = getSettings || (() => ({}));
+      this.onUpdate = onUpdate || (() => {
+      });
+      this.tap = null;
+      this.video = null;
+      this.timescale = null;
+      this.windows = [];
+      this.covered = 0;
+      this._queue = [];
+      this._draining = false;
+      this._lastEmitted = null;
+      this._decodeCtx = null;
+    }
+    isApplicable(ctx) {
+      if (!ctx || !ctx.video)
+        return false;
+      if (typeof window === "undefined" || !window.MediaSource || !window.SourceBuffer)
+        return false;
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      return !!AudioCtx;
+    }
+    /**
+     * Ставится отдельно от run: init-сегмент уходит в MSE один раз, ещё до того
+     * как элемент <video> появится в DOM. Опоздать с перехватом значит остаться
+     * без init, а без него медиа-сегменты не декодируются.
+     */
+    installTap() {
+      if (this.tap)
+        return this.tap.isInstalled();
+      this.tap = new MseTap({
+        log: this.log,
+        wantsMore: () => this._wantsMore(),
+        onSegment: (bytes) => this._enqueue(bytes)
+      });
+      const ok = this.tap.install();
+      if (this.getSettings().debug) {
+        this.log("log", ok ? "lookahead_audio: перехват MSE установлен." : "lookahead_audio: перехват не установлен (MSE недоступен или уже занят).");
+      }
+      return ok;
+    }
+    async run(ctx) {
+      this.video = ctx.video;
+      this.installTap();
+      if (this.getSettings().debug && this.tap && !this.tap.sawAudioBuffer()) {
+        this.log("log", "lookahead_audio: звуковой SourceBuffer пока не создан — источник, похоже, не через MSE.");
+      }
+    }
+    cancel() {
+      super.cancel();
+      if (this.tap) {
+        this.tap.uninstall();
+        this.tap = null;
+      }
+      if (this._decodeCtx) {
+        try {
+          this._decodeCtx.close();
+        } catch (e) {
+        }
+        this._decodeCtx = null;
+      }
+      this.windows = [];
+      this._queue = [];
+      this.covered = 0;
+      this.timescale = null;
+      this._lastEmitted = null;
+    }
+    _searchEndSec() {
+      const duration = this.video && Number.isFinite(this.video.duration) ? this.video.duration : 0;
+      if (!duration)
+        return MAX_LOOKAHEAD_SEC;
+      return Math.min(duration * INTRO_MAX_FRACTION2 + 30, MAX_LOOKAHEAD_SEC);
+    }
+    _wantsMore() {
+      if (this.cancelled)
+        return false;
+      return this.covered < this._searchEndSec();
+    }
+    _enqueue(bytes) {
+      if (this.cancelled)
+        return;
+      this._queue.push(bytes);
+      if (this._draining)
+        return;
+      this._draining = true;
+      setTimeout(() => this._drain(), 0);
+    }
+    async _drain() {
+      while (this._queue.length && !this.cancelled) {
+        const bytes = this._queue.shift();
+        try {
+          await this._consume(bytes);
+        } catch (e) {
+        }
+      }
+      this._draining = false;
+    }
+    async _consume(media) {
+      const init = this.tap && this.tap.getInitSegment();
+      if (!init)
+        return;
+      if (this.timescale === null)
+        this.timescale = readTimescale(init);
+      const startSec = segmentStartSec(media, this.timescale);
+      if (startSec === null || startSec > this._searchEndSec())
+        return;
+      const joined = new Uint8Array(init.length + media.length);
+      joined.set(init, 0);
+      joined.set(media, init.length);
+      const ctx = this._ctx();
+      if (!ctx)
+        return;
+      let buffer;
+      try {
+        buffer = await ctx.decodeAudioData(joined.buffer);
+      } catch (e) {
+        return;
+      }
+      if (this.cancelled)
+        return;
+      this._appendWindows(buffer, startSec);
+      this._analyse();
+    }
+    _ctx() {
+      if (this._decodeCtx)
+        return this._decodeCtx;
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx)
+        return null;
+      try {
+        this._decodeCtx = new AudioCtx();
+      } catch (e) {
+        return null;
+      }
+      return this._decodeCtx;
+    }
+    _appendWindows(buffer, startSec) {
+      const data = buffer.getChannelData(0);
+      const rate = buffer.sampleRate;
+      const size = Math.max(1, Math.floor(WINDOW_SEC * rate));
+      for (let offset = 0; offset + size <= data.length; offset += size) {
+        let sumSq = 0;
+        for (let i = 0; i < size; i += 1) {
+          const s = data[offset + i];
+          sumSq += s * s;
+        }
+        const t2 = startSec + offset / rate;
+        this.windows.push({ start: t2, end: t2 + WINDOW_SEC, rms: Math.sqrt(sumSq / size) });
+      }
+      this.windows.sort((a, b) => a.start - b.start);
+      const last = this.windows[this.windows.length - 1];
+      if (last)
+        this.covered = last.end;
+    }
+    _analyse() {
+      if (this.covered < MIN_ANALYSIS_SEC)
+        return;
+      const duration = this.video && Number.isFinite(this.video.duration) ? this.video.duration : 0;
+      if (!duration)
+        return;
+      const result = this.detect(this.windows, duration);
+      if (!result)
+        return;
+      if (this._lastEmitted && Math.abs(this._lastEmitted.start - result.start) < 0.5 && Math.abs(this._lastEmitted.end - result.end) < 0.5)
+        return;
+      this._lastEmitted = result;
+      if (this.getSettings().debug) {
+        this.log("log", "lookahead_audio: найдено вступление", {
+          start: +result.start.toFixed(1),
+          end: +result.end.toFixed(1),
+          covered: +this.covered.toFixed(1),
+          playhead: this.video ? +this.video.currentTime.toFixed(1) : null
+        });
+      }
+      this.onUpdate(
+        { intro: [{ start: result.start, end: result.end }], credits: [] },
+        { confidence: "medium", source: "lookahead_audio" }
+      );
+    }
+    /** Чистая часть: из окон RMS в границы вступления. Вынесена ради проверок. */
+    detect(windows, duration) {
+      if (!windows.length)
+        return null;
+      const split = otsuThreshold(windows.map((w) => w.rms));
+      if (!split)
+        return null;
+      if (split.meanLoud - split.meanQuiet < MIN_CLASS_SEPARATION)
+        return null;
+      if (split.meanLoud < ABS_RMS_FLOOR2)
+        return null;
+      const loud = windows.filter((w) => w.rms > split.threshold && w.rms >= ABS_RMS_FLOOR2).map((w) => ({ start: w.start, end: w.end }));
+      if (!loud.length)
+        return null;
+      const merged = mergeSegments(loud, MERGE_GAP_SEC2);
+      const zoneEnd = duration * INTRO_MAX_FRACTION2;
+      const analysedUpTo = windows[windows.length - 1].end;
+      for (const seg of merged) {
+        if (seg.start < INTRO_MIN_START_SEC2)
+          continue;
+        if (seg.start > zoneEnd)
+          continue;
+        if (seg.end - seg.start < INTRO_MIN_DURATION_SEC2)
+          continue;
+        if (analysedUpTo - seg.end < WINDOW_SEC * 2)
+          continue;
+        const inside = windows.filter((w) => w.start >= seg.start && w.end <= seg.end);
+        if (!inside.length)
+          continue;
+        const quiet = inside.filter((w) => w.rms <= split.threshold).length / inside.length;
+        if (quiet > MAX_QUIET_FRACTION)
+          continue;
+        return { start: seg.start, end: seg.end };
+      }
+      return null;
+    }
+  };
+
   // src/playback/PlaybackController.js
   var PlaybackController = class {
     constructor({ resolver, getSettings, onSegmentEnter, onSegmentLeave, log }) {
@@ -4120,7 +4624,7 @@
   var ATTACH_POLL_TIMEOUT_MS = 5e3;
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "3.1.11";
+      this.version = "3.2.0";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";
@@ -4169,6 +4673,10 @@
         getSettings: () => this.settings
       });
       this.prefetchAudioProvider = new PrefetchAudioProvider({
+        log: this.log,
+        getSettings: () => this.settings
+      });
+      this.lookaheadAudioProvider = new LookaheadAudioProvider({
         log: this.log,
         getSettings: () => this.settings
       });
@@ -4306,6 +4814,11 @@
       this.playback.resetSession();
       this.visibilityGuard.attach();
       this._hideSkipButton();
+      try {
+        this.lookaheadAudioProvider.installTap();
+      } catch (e) {
+        this.log("warn", "lookahead tap install failed", e);
+      }
       const attach = () => {
         const video = this._getVideo();
         if (!video)
@@ -4346,6 +4859,7 @@
       this._runProvider(this.aniSkipProvider);
       this._runProvider(this.theIntroDbProvider);
       this._runProvider(this.subtitleProvider);
+      this._runProvider(this.lookaheadAudioProvider);
       this.playback.attach(this.video);
       this.skipPrompt.attachToVideo(this.video);
       this.timelineMarkers.attach(this.video);
@@ -4406,7 +4920,14 @@
       this.playback.detach();
       this.audioProvider.cancel();
       this.audioProvider.reset();
-      [this.theIntroDbProvider, this.aniSkipProvider, this.subtitleProvider, this.visualProvider, this.prefetchAudioProvider].forEach((provider) => {
+      [
+        this.theIntroDbProvider,
+        this.aniSkipProvider,
+        this.subtitleProvider,
+        this.visualProvider,
+        this.prefetchAudioProvider,
+        this.lookaheadAudioProvider
+      ].forEach((provider) => {
         if (!provider)
           return;
         try {

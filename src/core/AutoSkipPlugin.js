@@ -16,6 +16,7 @@ import { TheIntroDBProvider } from '../segments/providers/TheIntroDBProvider.js'
 import { SubtitleProvider } from '../segments/providers/SubtitleProvider.js';
 import { VisualProvider } from '../segments/providers/VisualProvider.js';
 import { PrefetchAudioProvider } from '../segments/providers/PrefetchAudioProvider.js';
+import { LookaheadAudioProvider } from '../segments/providers/LookaheadAudioProvider.js';
 import { PlaybackController } from '../playback/PlaybackController.js';
 import { VisibilityGuard } from '../playback/visibilityGuard.js';
 import { hasNativeSkip } from '../playback/nativeSkipDetect.js';
@@ -28,7 +29,7 @@ const ATTACH_POLL_TIMEOUT_MS = 5000;
 
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '3.1.11';
+    this.version = '3.2.0';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';
@@ -82,6 +83,10 @@ export class AutoSkipPlugin {
       getSettings: () => this.settings
     });
     this.prefetchAudioProvider = new PrefetchAudioProvider({
+      log: this.log,
+      getSettings: () => this.settings
+    });
+    this.lookaheadAudioProvider = new LookaheadAudioProvider({
       log: this.log,
       getSettings: () => this.settings
     });
@@ -230,6 +235,12 @@ export class AutoSkipPlugin {
     this.visibilityGuard.attach();
     this._hideSkipButton();
 
+    // Перехват MSE ставим до всего остального: init-сегмент уходит в
+    // SourceBuffer один раз, ещё до появления <video> в DOM, и опоздание
+    // означает остаться без него насовсем.
+    try { this.lookaheadAudioProvider.installTap(); }
+    catch (e) { this.log('warn', 'lookahead tap install failed', e); }
+
     const attach = () => {
       const video = this._getVideo();
       if (!video) return false;
@@ -277,6 +288,7 @@ export class AutoSkipPlugin {
     this._runProvider(this.aniSkipProvider);
     this._runProvider(this.theIntroDbProvider);
     this._runProvider(this.subtitleProvider);
+    this._runProvider(this.lookaheadAudioProvider);
 
     this.playback.attach(this.video);
     this.skipPrompt.attachToVideo(this.video);
@@ -332,7 +344,8 @@ export class AutoSkipPlugin {
     this.playback.detach();
     this.audioProvider.cancel();
     this.audioProvider.reset();
-    [this.theIntroDbProvider, this.aniSkipProvider, this.subtitleProvider, this.visualProvider, this.prefetchAudioProvider].forEach((provider) => {
+    [this.theIntroDbProvider, this.aniSkipProvider, this.subtitleProvider, this.visualProvider,
+      this.prefetchAudioProvider, this.lookaheadAudioProvider].forEach((provider) => {
       if (!provider) return;
       try { provider.cancel(); } catch (e) { /* noop */ }
       try { provider.reset(); } catch (e) { /* noop */ }

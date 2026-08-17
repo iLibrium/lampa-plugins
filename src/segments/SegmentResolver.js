@@ -5,12 +5,13 @@ const SOURCE_PRIORITY = {
   audio: 1,
   visual: 2,
   prefetch_audio: 3,
-  subtitle_gap: 4,
-  subtitle: 5,
-  chapters: 6,
-  metadata: 7,
-  theintrodb: 8,
-  aniskip: 9
+  lookahead_audio: 4,
+  subtitle_gap: 5,
+  subtitle: 6,
+  chapters: 7,
+  metadata: 8,
+  theintrodb: 9,
+  aniskip: 10
 };
 
 const SOURCE_CONFIDENCE = {
@@ -18,6 +19,9 @@ const SOURCE_CONFIDENCE = {
   audio: 'low',
   visual: 'medium',
   prefetch_audio: 'medium',
+  // Настоящий звук потока, разобранный до того, как зритель до него дошёл.
+  // Надёжнее prefetch: данные не обрезаны и принадлежат именно этой дорожке.
+  lookahead_audio: 'medium',
   // Провал реплик — догадка: так же выглядит долгая тихая сцена. Показываем
   // кнопку, но автопропуск не разрешаем, пока догадку не подтвердит кто-то ещё.
   subtitle_gap: 'low',
