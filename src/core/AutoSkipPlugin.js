@@ -23,9 +23,12 @@ import { SkipPrompt } from '../ui/SkipPrompt/SkipPrompt.js';
 import { TimelineMarkers } from '../ui/TimelineMarkers/TimelineMarkers.js';
 import { t as translate, registerTranslations } from '../util/i18n.js';
 
+const ATTACH_POLL_INTERVAL_MS = 100;
+const ATTACH_POLL_TIMEOUT_MS = 5000;
+
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '3.1.10';
+    this.version = '3.1.11';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';
@@ -248,12 +251,23 @@ export class AutoSkipPlugin {
     };
 
     if (attach()) return;
+
+    // Повторные попытки шли через requestAnimationFrame, а он в скрытой вкладке
+    // не срабатывает ни разу. Если к моменту события start элемента <video> в
+    // DOM ещё нет — а так бывает, когда воспроизведение начинается в свёрнутом
+    // окне, — плагин молча умирал: ни одного провайдера, ни одной строки в
+    // логе. setTimeout душат, но не отключают.
     const startedAt = Date.now();
     const poll = () => {
-      if (attach()) return;
-      if (Date.now() - startedAt < 2000) requestAnimationFrame(poll);
+      if (attach()) {
+        if (this.settings.debug) this.log('log', `video attached after ${Date.now() - startedAt} ms of polling.`);
+        return;
+      }
+      if (Date.now() - startedAt < ATTACH_POLL_TIMEOUT_MS) { setTimeout(poll, ATTACH_POLL_INTERVAL_MS); return; }
+      this.log('warn', 'video element not found within '
+        + (ATTACH_POLL_TIMEOUT_MS / 1000) + 's after player start — providers not launched.');
     };
-    poll();
+    setTimeout(poll, ATTACH_POLL_INTERVAL_MS);
   }
 
   _onVideoReady() {

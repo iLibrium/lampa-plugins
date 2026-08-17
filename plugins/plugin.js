@@ -4116,9 +4116,11 @@
   };
 
   // src/core/AutoSkipPlugin.js
+  var ATTACH_POLL_INTERVAL_MS = 100;
+  var ATTACH_POLL_TIMEOUT_MS = 5e3;
   var AutoSkipPlugin = class {
     constructor() {
-      this.version = "3.1.10";
+      this.version = "3.1.11";
       this.component = "autoskip";
       this.name = "AutoSkip";
       this.logTag = "[AutoSkip]";
@@ -4324,12 +4326,18 @@
         return;
       const startedAt = Date.now();
       const poll = () => {
-        if (attach())
+        if (attach()) {
+          if (this.settings.debug)
+            this.log("log", `video attached after ${Date.now() - startedAt} ms of polling.`);
           return;
-        if (Date.now() - startedAt < 2e3)
-          requestAnimationFrame(poll);
+        }
+        if (Date.now() - startedAt < ATTACH_POLL_TIMEOUT_MS) {
+          setTimeout(poll, ATTACH_POLL_INTERVAL_MS);
+          return;
+        }
+        this.log("warn", "video element not found within " + ATTACH_POLL_TIMEOUT_MS / 1e3 + "s after player start — providers not launched.");
       };
-      poll();
+      setTimeout(poll, ATTACH_POLL_INTERVAL_MS);
     }
     _onVideoReady() {
       this._applyCachedSegments();
