@@ -29,7 +29,7 @@ const ATTACH_POLL_TIMEOUT_MS = 5000;
 
 export class AutoSkipPlugin {
   constructor() {
-    this.version = '3.2.0';
+    this.version = '3.2.1';
     this.component = 'autoskip';
     this.name = 'AutoSkip';
     this.logTag = '[AutoSkip]';

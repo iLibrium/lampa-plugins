@@ -114,9 +114,16 @@ export class LookaheadAudioProvider extends ProviderBase {
   async run(ctx) {
     this.video = ctx.video;
     this.installTap();
-    if (this.getSettings().debug && this.tap && !this.tap.sawAudioBuffer()) {
-      this.log('log', 'lookahead_audio: звуковой SourceBuffer пока не создан — источник, похоже, не через MSE.');
-    }
+
+    // Звуковой SourceBuffer создаётся не мгновенно, поэтому вердикт «источник
+    // не через MSE» выносим с задержкой, а не в момент запуска.
+    if (!this.getSettings().debug) return;
+    setTimeout(() => {
+      if (this.cancelled || !this.tap) return;
+      if (!this.tap.sawAudioBuffer()) {
+        this.log('log', 'lookahead_audio: звукового SourceBuffer нет — источник не через MSE, заглядывание недоступно.');
+      }
+    }, 8000);
   }
 
   cancel() {
@@ -178,7 +185,23 @@ export class LookaheadAudioProvider extends ProviderBase {
     if (this.cancelled) return;
 
     this._appendWindows(buffer, startSec);
+    this._logProgress(buffer);
     this._analyse();
+  }
+
+  _logProgress(buffer) {
+    if (!this.getSettings().debug) return;
+    const now = Date.now();
+    if (this._lastProgressAt && now - this._lastProgressAt < 5000) return;
+    this._lastProgressAt = now;
+    const playhead = this.video && Number.isFinite(this.video.currentTime) ? this.video.currentTime : 0;
+    this.log('log', 'lookahead_audio: разобрано вперёд', {
+      покрытоДо: +this.covered.toFixed(1),
+      позицияЗрителя: +playhead.toFixed(1),
+      опережениеСек: +(this.covered - playhead).toFixed(1),
+      окон: this.windows.length,
+      последнийСегментСек: +buffer.duration.toFixed(2)
+    });
   }
 
   _ctx() {
