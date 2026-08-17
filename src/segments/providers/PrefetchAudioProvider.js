@@ -15,6 +15,15 @@ const MIN_INTRO_SEG_SEC = 6;
 const MERGE_GAP_SEC = 3;
 const Z_THRESHOLD = 1.5;
 
+// Гейты повторяют живой звук намеренно. Без них provider отдавал первый же
+// громкий кусок длиной от шести секунд — то есть громкую сцену в холодном
+// открытии, — а уверенность prefetch_audio равна medium, и medium разрешает
+// автопропуск. Шесть секунд контента вырезались бы молча.
+const INTRO_MIN_START_SEC = 20;
+const INTRO_MIN_DURATION_SEC = 25;
+const INTRO_MAX_FRACTION = 0.3;
+const CREDITS_MIN_DURATION_SEC = 12;
+
 function fetchWithTimeout(url, options, timeoutMs) {
   if (typeof fetch !== 'function') return Promise.reject(new Error('fetch unavailable'));
   let timer = null;
@@ -78,7 +87,7 @@ export class PrefetchAudioProvider extends ProviderBase {
     const introBlob = await this._fetchRange(src, 0, introEnd);
     if (this.cancelled || !introBlob) return;
 
-    const introResult = await this._analyseSegment(introBlob, 'intro');
+    const introResult = await this._analyseSegment(introBlob, 'intro', { duration: video.duration });
     if (this.cancelled) return;
 
     let creditsResult = null;
@@ -174,6 +183,29 @@ export class PrefetchAudioProvider extends ProviderBase {
     }
   }
 
+  _rejectIntro(reason, seg) {
+    if (this.getSettings().debug) {
+      this.log('log', `prefetch_audio: кандидат в интро отклонён — ${reason}`,
+        seg ? { start: +seg.start.toFixed(1), end: +seg.end.toFixed(1) } : null);
+    }
+    return null;
+  }
+
+  // Из всех громких кусков берём первый, прошедший гейты, а не первый вообще.
+  _pickIntro(candidates, duration) {
+    if (!Number.isFinite(duration) || duration <= 0) {
+      return this._rejectIntro('длительность ролика неизвестна', candidates[0]);
+    }
+    const zoneEnd = duration * INTRO_MAX_FRACTION;
+    for (const seg of candidates) {
+      if (seg.start < INTRO_MIN_START_SEC) { this._rejectIntro('начинается слишком рано', seg); continue; }
+      if (seg.start > zoneEnd) { this._rejectIntro('вне зоны вступления', seg); continue; }
+      if ((seg.end - seg.start) < INTRO_MIN_DURATION_SEC) { this._rejectIntro('короче минимальной заставки', seg); continue; }
+      return seg;
+    }
+    return null;
+  }
+
   async _analyseSegment(arrayBuffer, kind, tailMeta) {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     let audioCtx;
@@ -227,18 +259,18 @@ export class PrefetchAudioProvider extends ProviderBase {
     if (!filtered.length) return null;
 
     const result = {};
+    filtered.sort((a, b) => a.start - b.start);
+
     if (kind === 'intro') {
-      filtered.sort((a, b) => a.start - b.start);
-      result.intro = filtered[0];
+      const picked = this._pickIntro(filtered, tailMeta && tailMeta.duration);
+      if (picked) result.intro = picked;
     } else if (kind === 'credits' && tailMeta && Number.isFinite(tailMeta.duration)) {
-      filtered.sort((a, b) => a.start - b.start);
       const last = filtered[filtered.length - 1];
       const proportion = tailMeta.tailStart / tailMeta.totalBytes;
       const tailDurationStart = tailMeta.duration * proportion;
-      result.credits = {
-        start: tailDurationStart + last.start,
-        end: tailMeta.duration
-      };
+      const credits = { start: tailDurationStart + last.start, end: tailMeta.duration };
+      if ((credits.end - credits.start) >= CREDITS_MIN_DURATION_SEC) result.credits = credits;
+      else if (this.getSettings().debug) this.log('log', 'prefetch_audio: кандидат в титры короче минимума');
     }
     return result;
   }
